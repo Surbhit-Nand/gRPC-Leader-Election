@@ -1,0 +1,12 @@
+/target/
+*.class
+.idea/
+nbproject/private/
+nbbuild/
+nbdist/
+.nb-gradle/
+# VS Code: share run/debug configs, keep machine-specific settings local
+.vscode/*
+!.vscode/launch.json
+*.log
+.DS_Store

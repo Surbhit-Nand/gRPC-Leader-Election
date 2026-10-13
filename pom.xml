@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>CS324</groupId>
+    <artifactId>A1_CS324</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.release>25</maven.compiler.release>
+        <exec.mainClass>com.cs324.client.ClientApp</exec.mainClass>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.10.2</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.5.1</version>
+                <configuration>
+                    <mainClass>${exec.mainClass}</mainClass>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.2.5</version>
+            </plugin>
+        </plugins>
+    </build>
+    <!--
+        Convenience profiles: each one only sets the default main class and the
+        plain program arguments for that node. They are intentionally free of any
+        "%classpath" template so they behave the same for exec:java and exec:exec.
+        A command line -Dexec.mainClass / -Dexec.args always overrides a profile.
+    -->
+    <profiles>
+        <profile>
+            <id>client</id>
+            <properties>
+                <exec.mainClass>com.cs324.client.ClientApp</exec.mainClass>
+            </properties>
+        </profile>
+        <profile>
+            <id>bootstrap</id>
+            <properties>
+                <exec.mainClass>com.cs324.bootstrap.BootstrapNode</exec.mainClass>
+                <exec.args>1099</exec.args>
+            </properties>
+        </profile>
+        <profile>
+            <id>worker</id>
+            <properties>
+                <exec.mainClass>com.cs324.worker.WorkerNode</exec.mainClass>
+                <exec.args>1 3500 localhost 1099</exec.args>
+            </properties>
+        </profile>
+    </profiles>
+</project>

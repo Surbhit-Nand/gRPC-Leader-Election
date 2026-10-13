@@ -1,0 +1,53 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "jdk",
+            "request": "launch",
+            "name": "Bootstrap Node (port 1099)",
+            "mainClass": "com.cs324.bootstrap.BootstrapNode",
+            "args": "1099",
+            "console": "internalConsole"
+        },
+        {
+            "type": "jdk",
+            "request": "launch",
+            "name": "Worker 1 (id 1, port 3500)",
+            "mainClass": "com.cs324.worker.WorkerNode",
+            "args": "1 3500 localhost 1099",
+            "console": "internalConsole"
+        },
+        {
+            "type": "jdk",
+            "request": "launch",
+            "name": "Worker 2 (id 2, port 3501)",
+            "mainClass": "com.cs324.worker.WorkerNode",
+            "args": "2 3501 localhost 1099",
+            "console": "internalConsole"
+        },
+        {
+            "type": "jdk",
+            "request": "launch",
+            "name": "Worker 3 (id 3, port 3502)",
+            "mainClass": "com.cs324.worker.WorkerNode",
+            "args": "3 3502 localhost 1099",
+            "console": "internalConsole"
+        },
+        {
+            "type": "jdk",
+            "request": "launch",
+            "name": "Client App (callback port 1199)",
+            "mainClass": "com.cs324.client.ClientApp",
+            "args": "localhost 1099 1199",
+            "console": "internalConsole"
+        },
+        {
+            "type": "jdk",
+            "request": "launch",
+            "name": "Client App 2 (callback port 1200)",
+            "mainClass": "com.cs324.client.ClientApp",
+            "args": "localhost 1099 1200",
+            "console": "internalConsole"
+        }
+    ]
+}
