@@ -1,4 +1,4 @@
-# CS324 Assignment 1 (2026) - Distributed Worker Cluster
+# CS324 Assignment 2 (2026) - Distributed Worker Cluster
 
 ## Prerequisites
 
