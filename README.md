@@ -12,13 +12,13 @@
 Clone the repo:
 
 ```
-git clone https://github.com/aryanjde/leader-election-algorithm.git
+git clone https://github.com/Surbhit-Nand/CS324_A2.git
 ```
 
 Move into the project folder:
 
 ```
-cd leader-election-algorithm
+cd CS324_A2
 ```
 
 Build the project:
