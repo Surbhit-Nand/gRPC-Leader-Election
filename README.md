@@ -12,13 +12,13 @@
 Clone the repo:
 
 ```
-git clone https://github.com/Surbhit-Nand/CS324_A2.git
+git clone https://github.com/Surbhit-Nand/gRPC-Leader-Election.git
 ```
 
 Move into the project folder:
 
 ```
-cd CS324_A2
+cd gRPC-Leader-Election
 ```
 
 Build the project:
