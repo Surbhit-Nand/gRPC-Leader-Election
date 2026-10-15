@@ -10,6 +10,7 @@ import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
 import java.util.Scanner;
+import java.util.Set;
 
 // Entry point for a Worker node: auto-assigns id + port, registers, joins a peer, serves elections and jobs.
 public class WorkerNode {
@@ -122,7 +123,7 @@ public class WorkerNode {
             startupElection.start();
         }
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            announceLeaving(worker, idForHook);
+            notifyNeighboursOfLeaving(worker, idForHook);
             try {
                 // Pool first: leaked pool threads are what stop a JVM from exiting.
                 if (worker != null) {
@@ -147,8 +148,8 @@ public class WorkerNode {
             }
         }));
 
-        runMenu(self, idForHook);
-        announceLeaving(self, idForHook);
+        runMenu(worker, idForHook);
+        notifyNeighboursOfLeaving(worker, idForHook);
 
         // RMI export holds non-daemon threads open, so returning would never end the JVM.
         System.exit(0);
@@ -156,22 +157,13 @@ public class WorkerNode {
 
     // Graceful-leave fast path: hand our neighbour set to every neighbour so survivors
     // chain to a grandparent immediately; crashes skip this and rely on failure detection.
-    private static void announceLeaving(WorkerRemoteImpl self, int workerId) {
+    private static void notifyNeighboursOfLeaving(WorkerRemoteImpl self, int workerId) {
         if (self == null) {
             return;
         }
         try {
-            java.util.Set<Integer> mine = self.getNeighbourIds();
-            for (int neighbourId : mine) {
-                try {
-                    WorkerRemote stub = self.getNeighbourStub(neighbourId);
-                    if (stub != null) {
-                        stub.notifyLeaving(workerId, mine);
-                    }
-                } catch (Exception ignored) {
-                    // best effort on shutdown
-                }
-            }
+            int notified = self.notifyNeighboursOfLeaving();
+            System.out.println("Handoff sent to " + notified + " neighbour(s) before leaving.");
         } catch (Exception ignored) {
             // best effort on shutdown
         }
@@ -294,12 +286,12 @@ public class WorkerNode {
                     coordinatorId = -1;
                 }
                 System.out.println();
-                java.util.Set<Integer> neighbourIds;
+                Set<Integer> neighbourIds;
                 try {
                     // Local call, but the RMI signature forces checked-exception handling.
                     neighbourIds = self.getNeighbourIds();
                 } catch (RemoteException e) {
-                    neighbourIds = java.util.Set.of();
+                    neighbourIds = Set.of();
                 }
                 System.out.println("Worker " + workerId + " | coordinator=" + coordinatorId
                         + " | neighbours=" + neighbourIds);

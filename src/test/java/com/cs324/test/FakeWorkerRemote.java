@@ -1,9 +1,11 @@
 package com.cs324.test;
 
+import com.cs324.common.WorkerEvent;
 import com.cs324.common.WorkerRemote;
 
 import java.rmi.RemoteException;
 import java.rmi.server.UnicastRemoteObject;
+import java.util.List;
 import java.util.Set;
 
 // Silent test double for WorkerRemote: only getId() carries meaning, the rest are no-ops.
@@ -75,6 +77,11 @@ public class FakeWorkerRemote extends UnicastRemoteObject implements WorkerRemot
     @Override
     public void notifyLeaving(int leaverId, Set<Integer> leaverNeighbours) throws RemoteException {
         // not needed for these tests
+    }
+
+    @Override
+    public List<WorkerEvent> getRecentEvents(long afterSeq) throws RemoteException {
+        return List.of();
     }
 
     @Override

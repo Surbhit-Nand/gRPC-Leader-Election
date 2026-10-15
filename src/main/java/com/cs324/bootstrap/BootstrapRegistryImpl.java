@@ -16,6 +16,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 // Active-worker directory plus a job-id counter; it never takes part in elections.
 public class BootstrapRegistryImpl extends UnicastRemoteObject implements BootstrapRemote {
@@ -24,13 +26,11 @@ public class BootstrapRegistryImpl extends UnicastRemoteObject implements Bootst
     private final Map<Integer, WorkerAddress> activeWorkers = new ConcurrentHashMap<>();
 
     // Cluster-wide job ids, so two client windows cannot collide on one id.
-    private final java.util.concurrent.atomic.AtomicLong nextJobId =
-            new java.util.concurrent.atomic.AtomicLong(1);
+    private final AtomicLong nextJobId = new AtomicLong(1);
 
     // Monotonic worker ids for auto-registration; never reused (deregister does not rewind it).
     // In-memory only, so a Bootstrap restart resets the sequence to 1 alongside the directory.
-    private final java.util.concurrent.atomic.AtomicInteger nextWorkerId =
-            new java.util.concurrent.atomic.AtomicInteger(1);
+    private final AtomicInteger nextWorkerId = new AtomicInteger(1);
 
     @Override
     public int allocateJobId() throws RemoteException {

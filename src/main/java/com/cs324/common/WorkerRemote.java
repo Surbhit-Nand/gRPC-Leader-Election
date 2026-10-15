@@ -2,6 +2,7 @@ package com.cs324.common;
 
 import java.rmi.Remote;
 import java.rmi.RemoteException;
+import java.util.List;
 import java.util.Set;
 
 // RMI contract every Worker node implements: discovery, election, and job execution.
@@ -44,6 +45,11 @@ public interface WorkerRemote extends Remote {
     // Graceful-leave fast path: the leaver hands its neighbour set over before deregistering,
     // so survivors can chain to a grandparent without waiting for a failure probe.
     void notifyLeaving(int leaverId, Set<Integer> leaverNeighbours) throws RemoteException;
+
+    // Recent happenings on this worker with sequence above afterSeq, oldest first.
+    // Bounded by the worker's ring buffer: a client that falls too far behind
+    // silently misses the overflowed prefix and resumes from what is returned.
+    List<WorkerEvent> getRecentEvents(long afterSeq) throws RemoteException;
 
     // The winning candidate's verdict, relayed outward by every node that hears it.
     void receiveCoordinatorMessage(int coordinatorId, long messageId) throws RemoteException;
