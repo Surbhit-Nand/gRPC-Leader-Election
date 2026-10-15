@@ -1,0 +1,20 @@
+syntax = "proto3";
+package distrilab;
+option java_package = "com.cs324.progress.proto";
+option java_multiple_files = true;
+
+service JobProgressService {
+  rpc WatchJob(WatchJobRequest) returns (stream JobProgress);
+}
+message WatchJobRequest { int32 job_id = 1; }
+message WorkerProgress {
+  int32 worker_id = 1;
+  int64 total_units = 2;
+  int64 completed_units = 3;
+  string status = 4;
+}
+message JobProgress {
+  int32 job_id = 1;
+  repeated WorkerProgress workers = 2;
+  bool finished = 3;
+}

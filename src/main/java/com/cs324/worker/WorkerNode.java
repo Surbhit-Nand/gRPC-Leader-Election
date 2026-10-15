@@ -173,6 +173,13 @@ public class WorkerNode {
     private static WorkerRemoteImpl bindLocalWorker(Registry localRegistry, int workerId, int rmiPort,
             String tag) throws RemoteException {
         WorkerRemoteImpl self = new WorkerRemoteImpl(workerId);
+        try {
+            self.startProgressServer();
+        } catch (java.io.IOException e) {
+            self.shutdown();
+            java.rmi.server.UnicastRemoteObject.unexportObject(self, true);
+            throw new RemoteException("Cannot start gRPC progress server", e);
+        }
         localRegistry.rebind("Worker" + workerId, self);
         System.out.println("Worker " + workerId + " bound as Worker" + workerId
                 + " on port " + rmiPort + " (" + tag + ")");

@@ -32,6 +32,17 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemote {
+    private final com.cs324.progress.ProgressService progress = new com.cs324.progress.ProgressService();
+    private io.grpc.Server progressServer;
+
+    public synchronized void startProgressServer() throws java.io.IOException {
+        if (progressServer == null) {
+            progressServer = io.grpc.ServerBuilder.forPort(0).addService(progress).build().start();
+        }
+    }
+
+    @Override
+    public synchronized int getProgressPort() { return progressServer == null ? -1 : progressServer.getPort(); }
 
     // One election wave, plus the bookkeeping needed to complete it.
     private static class ElectionState {
@@ -640,6 +651,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
             if (!state.expected().contains(workerId)) return;
             taskResults.put(new JobResultKey(jobId, workerId), result);
             state.expected().remove(workerId);
+            progress.complete(jobId, workerId, result instanceof Number);
         }
         finishJobIfReady(jobId, state);
     }
@@ -684,6 +696,16 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
         }
         JobState state = new JobState(jobType, expected, clientHost, clientPort, clientName, new AtomicBoolean());
         coordinatingJobs.put(jobId, state);
+        Map<Integer, Long> units = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < participants.size(); i++) {
+            Object chunk = chunks.get(i);
+            if (chunk instanceof WorkerTaskCalculator.PrimeRange range) {
+                units.put(participants.get(i), (long) range.end() - range.start() + 1);
+            } else if (chunk instanceof int[] values) {
+                units.put(participants.get(i), (long) values.length);
+            }
+        }
+        progress.begin(jobId, units);
         // Peers report through this stub, so results still reach us if leadership moves.
         WorkerRemote callback = (WorkerRemote) UnicastRemoteObject.toStub(this);
 
@@ -931,6 +953,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
 
     // Stops both pools; daemon threads mean a missed call cannot block JVM exit.
     public void shutdown() {
+        if (progressServer != null) progressServer.shutdownNow();
         executor.shutdown();
         heartbeatExecutor.shutdown();
     }

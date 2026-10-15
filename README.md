@@ -24,7 +24,7 @@ cd gRPC-Leader-Election
 Build the project:
 
 ```
-mvn compile
+mvn compile dependency:copy-dependencies -DincludeScope=runtime
 ```
 
 To run the Bootstrap Node, the Workers and the Client, see [How to Run](#how-to-run-any-ide-or-terminal) below.
@@ -33,22 +33,22 @@ To run the Bootstrap Node, the Workers and the Client, see [How to Run](#how-to-
 
 ## How to Run (any IDE or terminal)
 
-The project has no runtime dependencies (JUnit is `test`-scoped), so the runtime classpath is just `target/classes`. These commands behave the same in VS Code, IntelliJ, Eclipse and a plain terminal; Apache NetBeans needs extra setup for the worker, see [Apache NetBeans](#apache-netbeans). Every node is a separate process, so start each one in its own terminal.
+The project uses gRPC runtime dependencies. The build command above copies them to `target/dependency`. The commands below use the Windows classpath separator (`;`); use `:` on Linux/macOS. These commands behave the same in VS Code, IntelliJ, Eclipse and a plain terminal; Apache NetBeans needs extra setup for the worker, see [Apache NetBeans](#apache-netbeans). Every node is a separate process, so start each one in its own terminal.
 
 **All nodes run on the same machine** (`localhost`), one terminal each.
 
 Bootstrap Node (start first, one only):
 
 ```
-java -cp target/classes com.cs324.bootstrap.BootstrapNode 1099
+java -cp "target/classes;target/dependency/*" com.cs324.bootstrap.BootstrapNode 1099
 ```
 
 Worker Node (one per terminal, no id/port typing). Bootstrap auto-assigns a monotonic
 worker id and the worker picks the first free RMI port from 3500 upward:
 
 ```
-java -cp target/classes com.cs324.worker.WorkerNode localhost 1099
-java -cp target/classes com.cs324.worker.WorkerNode localhost 1099
+java -cp "target/classes;target/dependency/*" com.cs324.worker.WorkerNode localhost 1099
+java -cp "target/classes;target/dependency/*" com.cs324.worker.WorkerNode localhost 1099
 ```
 
 Each run prints the assigned id, e.g. `Worker 1 bound as Worker1 on port 3500 (auto-assigned)`.
@@ -60,8 +60,8 @@ empty); restarting Bootstrap resets the sequence to 1. Restart all workers toget
 Client (Swing GUI). Every client process needs **its own callback port** for receiving results, so start one client per terminal and give each a different port — `1199`, `1200`, `1201`, ... Launching the same port twice on one machine makes the second client fail to bind:
 
 ```
-java -cp target/classes com.cs324.client.ClientApp localhost 1099 1199
-java -cp target/classes com.cs324.client.ClientApp localhost 1099 1200
+java -cp "target/classes;target/dependency/*" com.cs324.client.ClientApp localhost 1099 1199
+java -cp "target/classes;target/dependency/*" com.cs324.client.ClientApp localhost 1099 1200
 ```
 
 The arguments are `bootstrapHost bootstrapPort clientRmiPort`; all three are optional and default to `localhost 1099 1199`.
@@ -113,7 +113,7 @@ For anything that has to keep running, fork a JVM with `exec:exec` (`%classpath`
 mvn exec:exec -Dexec.executable=java -Dexec.args="-classpath %classpath com.cs324.bootstrap.BootstrapNode 1099"
 ```
 
-**Why fork:** `exec:java` runs the program inside the Maven JVM and only tracks threads created in its own thread group. RMI (`LocateRegistry.createRegistry`, exported remote objects) creates non-daemon threads in the *system* thread group, so a node started that way can disappear as soon as the build finishes - measured on this repo: `mvn -Pbootstrap exec:java` printed `Bootstrap Node running on port 1099 as BootstrapRegistry` and then exited, while the `exec:exec` form was still listening on port 1099 after 30 seconds and released the port when Maven was stopped. The same applies to the client, which creates its own result registry, so the `java -cp target/classes` commands above are the ones to use for the demo.
+**Why fork:** `exec:java` runs the program inside the Maven JVM and only tracks threads created in its own thread group. RMI (`LocateRegistry.createRegistry`, exported remote objects) creates non-daemon threads in the *system* thread group, so a node started that way can disappear as soon as the build finishes - measured on this repo: `mvn -Pbootstrap exec:java` printed `Bootstrap Node running on port 1099 as BootstrapRegistry` and then exited, while the `exec:exec` form was still listening on port 1099 after 30 seconds and released the port when Maven was stopped. The same applies to the client, which creates its own result registry, so the `java -cp "target/classes;target/dependency/*"` commands above are the ones to use for the demo.
 
 ### Troubleshooting
 
@@ -252,7 +252,7 @@ mvn "-Dtest=WorkerTaskCalculatorTest" test
 Run the updated client (use the forked form - see [Why fork](#command-line-with-maven-optional)):
 
 ```powershell
-java -cp target/classes com.cs324.client.ClientApp localhost 1099 1199
+java -cp "target/classes;target/dependency/*" com.cs324.client.ClientApp localhost 1099 1199
 ```
 
 ### Distribution integration
@@ -286,3 +286,27 @@ a delayed worker, result delivery after a leader change, and two concurrent clie
 callbacks with distinct job IDs. `WorkerDispatchTest` covers the five-job term:
 the coordinator keeps leading through four jobs and rotates to the lowest-JAC
 worker on the fifth. Existing election and threading tests remain intact.
+
+## Job progress (first A2 migration step)
+
+Each job has a Progress column. Click its bar to open a live worker breakdown.
+The percentage is completed input values divided by total input values, weighted
+by the size of each worker's assigned share. For PRIMESUM ranges, each integer in
+the inclusive range counts as one value. Updates occur when a whole worker share
+returns successfully, so small jobs may go straight to 100%, and one large share
+will not show intermediate progress. This is completed work, not elapsed time.
+Errors do not count as successful completion.
+
+Progress snapshots use the Protocol Buffers contract in `src/main/proto/progress.proto`
+and a gRPC server stream. Each worker opens an available progress port at startup;
+the client discovers that port from the coordinator. Maven generates Java protobuf
+and service classes during `compile`; reload the Maven project in your IDE.
+The coordinator retains the latest 256 completed job snapshots, allowing very fast
+jobs to display progress even when they finish before the client subscribes.
+
+This is an incremental migration: job submission, results, discovery, elections,
+and worker task delivery still use RMI. Progress updates are at share completion,
+not within a share. A locally recovered share keeps its originally assigned worker
+label. Interrupted progress streams are displayed explicitly and do not yet reconnect
+automatically or recover across coordinator failure. Full A2 transport migration and
+failure recovery remain to be implemented.

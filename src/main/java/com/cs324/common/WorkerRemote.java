@@ -7,6 +7,7 @@ import java.util.Set;
 
 // RMI contract every Worker node implements: discovery, election, and job execution.
 public interface WorkerRemote extends Remote {
+    default int getProgressPort() throws RemoteException { return -1; }
 
     // Identity, and the tie-break used when two workers share a JAC.
     int getId() throws RemoteException;

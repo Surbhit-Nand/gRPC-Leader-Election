@@ -57,7 +57,7 @@ public class ClientApp extends JFrame {
 
     // The model stores submitted jobs; JTable displays them. Users cannot edit the rows.
     private final DefaultTableModel jobModel = new DefaultTableModel(
-            new String[]{"Job ID", "Operation", "Input", "Status", "Result"},
+            new String[]{"Job ID", "Operation", "Input", "Status", "Result", "Progress"},
             0
     ) {
         @Override
@@ -66,7 +66,24 @@ public class ClientApp extends JFrame {
         }
     };
 
+    private final JobProgressView progressView = new JobProgressView(jobModel);
+    private volatile long historyGeneration;
+
+    private void clearJobHistory() {
+        historyGeneration++;
+        rowByJobId.clear();
+        progressView.clear();
+        jobModel.setRowCount(0);
+        jobCount.setText("0 jobs");
+        historyLayout.show(historyContent, "empty");
+        statusLabel.setText("Job history cleared. Submitted jobs continue on the cluster.");
+    }
     private final JLabel jobCount = new JLabel("0 jobs");
+
+    @Override public void dispose() {
+        progressView.close();
+        super.dispose();
+    }
     // CardLayout displays either the empty-state message or the populated table.
     private final CardLayout historyLayout = new CardLayout();
     private final JPanel historyContent = new JPanel(historyLayout);
@@ -234,11 +251,18 @@ public class ClientApp extends JFrame {
                 "Track submitted jobs and their final results.", "list"), BorderLayout.CENTER);
         jobCount.setFont(BODY.deriveFont(12f));
         jobCount.setForeground(MUTED);
-        historyHeading.add(jobCount, BorderLayout.EAST);
+        JPanel historyActions = transparentPanel(new FlowLayout(FlowLayout.RIGHT, 12, 0));
+        JButton clearHistoryButton = button("Clear job history", "trash", false);
+        clearHistoryButton.setToolTipText("Clear displayed jobs; this does not cancel submitted work.");
+        clearHistoryButton.addActionListener(event -> clearJobHistory());
+        historyActions.add(jobCount);
+        historyActions.add(clearHistoryButton);
+        historyHeading.add(historyActions, BorderLayout.EAST);
         history.add(historyHeading, BorderLayout.NORTH);
 
         // Sorting changes the displayed order, while the model remains the source of row data.
         JTable jobTable = new JTable(jobModel);
+        progressView.install(jobTable);
         jobTable.setFillsViewportHeight(true);
         jobTable.setAutoCreateRowSorter(true);
         jobTable.setFont(BODY.deriveFont(13f));
@@ -338,6 +362,7 @@ public class ClientApp extends JFrame {
         workspaceScroll.getViewport().setBackground(BACKGROUND);
         workspaceScroll.getVerticalScrollBar().setUnitIncrement(20);
         root.add(workspaceScroll, BorderLayout.CENTER);
+        SmoothScrolling.install(root);
         // Status line mirrors the newest job event; the hint explains where work runs.
         statusLabel.setText("Ready to prepare a job.");
         statusLabel.setFont(BODY.deriveFont(12f));
@@ -746,8 +771,9 @@ public class ClientApp extends JFrame {
         final String op = operation;
         final Object finalPayload = payload;
         final int modelRow = jobModel.getRowCount();
+        final long generation = historyGeneration;
         // The row is added first, so a fast result can never land on a missing row.
-        jobModel.addRow(new Object[]{"Connecting", op, inputSummary, "Connecting", ""});
+        jobModel.addRow(new Object[]{"Connecting", op, inputSummary, "Connecting", "", 0});
         rowByJobId.put(requestId, modelRow);
         historyLayout.show(historyContent, "table");
         jobCount.setText(jobModel.getRowCount() + (jobModel.getRowCount() == 1 ? " job" : " jobs"));
@@ -760,8 +786,12 @@ public class ClientApp extends JFrame {
                 final int jobId = bootstrap.allocateJobId();
 
                 assignedId.set(jobId);
-                rowByJobId.remove(requestId);
-                rowByJobId.put(jobId, modelRow);
+                SwingUtilities.invokeAndWait(() -> {
+                    if (generation != historyGeneration) return;
+                    rowByJobId.remove(requestId);
+                    rowByJobId.put(jobId, modelRow);
+                    jobModel.setValueAt(jobId, modelRow, 0);
+                });
 
                 // Discover the coordinator and retry submission if needed.
                 int coordinatorId = -1;
@@ -794,6 +824,16 @@ public class ClientApp extends JFrame {
                         );
 
                         accepted = true;
+                        // Progress failure must never resubmit an already accepted job.
+                        try {
+                            WorkerAddress address = bootstrap.getWorkerAddress(coordinatorId);
+                            progressView.watch(address.getRmiHost(), coordinator.getProgressPort(), jobId, modelRow,
+                                    () -> generation == historyGeneration);
+                        } catch (Exception progressError) {
+                            SwingUtilities.invokeLater(() -> {
+                                if (generation == historyGeneration) jobModel.setValueAt("Unavailable", modelRow, 5);
+                            });
+                        }
                         break;
 
                     } catch (RemoteException e) {
@@ -814,9 +854,9 @@ public class ClientApp extends JFrame {
                                     : "Unknown submission error";
 
                     // Back on the event thread, so model and label updates are legal.
-                    SwingUtilities.invokeLater(() ->
-                            onSubmissionFailed(jobId, modelRow, failMessage)
-                    );
+                    SwingUtilities.invokeLater(() -> {
+                        if (generation == historyGeneration) onSubmissionFailed(jobId, modelRow, failMessage);
+                    });
 
                     return;
                 }
@@ -825,7 +865,9 @@ public class ClientApp extends JFrame {
                 // A fast result can already be queued, so this can overwrite its status.
 
                 SwingUtilities.invokeLater(() -> {
+                    if (generation != historyGeneration) return;
                     jobModel.setValueAt(jobId, modelRow, 0);
+                    if (!rowByJobId.containsKey(jobId)) return;
                     jobModel.setValueAt(
                             "Submitted to coordinator " + submittedCoordinatorId,
                             modelRow,
@@ -842,7 +884,9 @@ public class ClientApp extends JFrame {
                 String message = exception.getMessage() == null
                         ? exception.getClass().getSimpleName()
                         : exception.getMessage();
-                SwingUtilities.invokeLater(() -> onSubmissionFailed(assignedId.get(), modelRow, message));
+                SwingUtilities.invokeLater(() -> {
+                    if (generation == historyGeneration) onSubmissionFailed(assignedId.get(), modelRow, message);
+                });
             }
         }).start();
     }
