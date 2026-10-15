@@ -14,9 +14,18 @@ import java.io.IOException;
 import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import static com.cs324.client.ClientStyle.*;
 
@@ -61,6 +70,30 @@ public class ClientApp extends JFrame {
     // CardLayout displays either the empty-state message or the populated table.
     private final CardLayout historyLayout = new CardLayout();
     private final JPanel historyContent = new JPanel(historyLayout);
+
+    // Cluster-activity view: worker snapshot table plus a feed of derived happenings.
+    // Polling only — workers expose no extra state, events come from snapshot diffs.
+    private final DefaultTableModel clusterModel = new DefaultTableModel(
+            new String[]{"Worker", "Role", "Coordinator view", "Neighbours", "JAC", "Status"},
+            0
+    ) {
+        @Override
+        public boolean isCellEditable(int row, int column) {
+            return false;
+        }
+    };
+    private final JTextArea clusterFeed = new JTextArea();
+    private final JLabel clusterStatusLabel = new JLabel("Connecting to cluster...");
+    private final ArrayDeque<String> clusterFeedLines = new ArrayDeque<>();
+    private static final int CLUSTER_FEED_MAX_LINES = 100;
+    private static final int CLUSTER_POLL_MS = 2000;
+    private ClusterMonitor.ClusterSnapshot lastClusterSnapshot;
+    private final Object clusterLock = new Object();
+    // Newest worker-event sequence shown per worker; seeds silently on first sighting.
+    private final Map<Integer, Long> eventSeqByWorker = new ConcurrentHashMap<>();
+    private final AtomicBoolean clusterPollInFlight =
+            new AtomicBoolean(false);
+    private javax.swing.Timer clusterTimer;
 
     // One-pass construction: builds the three sections, then wires controls to their handlers.
     public ClientApp(String bootstrapHost, int bootstrapPort, int clientPort) {
@@ -297,6 +330,7 @@ public class ClientApp extends JFrame {
         historyLayout.show(historyContent, "empty");
         history.add(historyContent, BorderLayout.CENTER);
         workspace.add(history, BorderLayout.CENTER);
+        workspace.add(buildClusterCard(), BorderLayout.SOUTH);
         // Scrolling wrapper keeps the cards legible on windows shorter than the content.
         JScrollPane workspaceScroll = new JScrollPane(workspace,
                 JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED, JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
@@ -332,8 +366,161 @@ public class ClientApp extends JFrame {
 
         // Seed the guidance once, so the window never opens with an unexplained empty field.
         updateExample();
+        // Cluster polling runs off the EDT and paints through renderClusterSnapshot.
+        clusterTimer = new javax.swing.Timer(CLUSTER_POLL_MS, event -> refreshClusterNow());
+        clusterTimer.setInitialDelay(500);
+        clusterTimer.start();
         setSize(1120, 870);
         setLocationRelativeTo(null);
+    }
+
+    // Third workspace card: live worker table, happening feed, and refresh controls.
+    private JPanel buildClusterCard() {
+        JPanel cluster = card(new BorderLayout(0, 14));
+        JPanel heading = transparentPanel(new BorderLayout());
+        heading.add(sectionHeading("Cluster activity",
+                "Live workers and what is happening between them.", "eye"), BorderLayout.CENTER);
+        JButton refreshButton = button("Refresh", "info", false);
+        refreshButton.setMnemonic('R');
+        refreshButton.setToolTipText("Poll the cluster now instead of waiting for the next update.");
+        refreshButton.addActionListener(event -> refreshClusterNow());
+        heading.add(refreshButton, BorderLayout.EAST);
+        cluster.add(heading, BorderLayout.NORTH);
+
+        JTable clusterTable = new JTable(clusterModel);
+        clusterTable.setFillsViewportHeight(true);
+        clusterTable.setFont(BODY.deriveFont(13f));
+        clusterTable.setRowHeight(32);
+        clusterTable.setShowVerticalLines(false);
+        clusterTable.setGridColor(LINE);
+        clusterTable.setIntercellSpacing(new Dimension(0, 1));
+        clusterTable.setSelectionBackground(LIGHT_BLUE);
+        clusterTable.setSelectionForeground(INK);
+        clusterTable.getTableHeader().setReorderingAllowed(false);
+        clusterTable.setDefaultRenderer(Object.class, new DefaultTableCellRenderer() {
+            @Override
+            public Component getTableCellRendererComponent(JTable table, Object value,
+                    boolean selected, boolean focused, int row, int column) {
+                super.getTableCellRendererComponent(table, value, selected, focused, row, column);
+                setBorder(BorderFactory.createEmptyBorder(0, 10, 0, 10));
+                if (!selected) {
+                    setBackground(row % 2 == 0 ? Color.WHITE : new Color(248, 250, 255));
+                    setForeground(INK);
+                }
+                setToolTipText(value == null ? null : value.toString());
+                return this;
+            }
+        });
+        int[] widths = {90, 120, 140, 160, 80, 120};
+        for (int i = 0; i < widths.length; i++) {
+            clusterTable.getColumnModel().getColumn(i).setPreferredWidth(widths[i]);
+        }
+        JScrollPane clusterPane = new JScrollPane(clusterTable);
+        clusterPane.setBorder(BorderFactory.createEmptyBorder());
+        clusterPane.getViewport().setBackground(Color.WHITE);
+        clusterPane.setPreferredSize(new Dimension(750, 110));
+        cluster.add(clusterPane, BorderLayout.CENTER);
+
+        clusterFeed.setEditable(false);
+        clusterFeed.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        clusterFeed.setForeground(INK);
+        clusterFeed.setBackground(Color.WHITE);
+        clusterFeed.setText("Waiting for the first cluster poll...");
+        JScrollPane feedPane = new JScrollPane(clusterFeed);
+        feedPane.setBorder(new RoundBorder(false));
+        feedPane.getViewport().setBackground(Color.WHITE);
+        feedPane.setPreferredSize(new Dimension(750, 120));
+
+        JPanel clusterFooter = transparentPanel(new BorderLayout(16, 0));
+        clusterStatusLabel.setFont(BODY.deriveFont(12f));
+        clusterStatusLabel.setForeground(MUTED);
+        clusterStatusLabel.setIcon(icon("dot", 18, new Color(31, 178, 141)));
+        clusterStatusLabel.setIconTextGap(8);
+        clusterFooter.add(clusterStatusLabel, BorderLayout.CENTER);
+
+        JPanel south = transparentPanel(new BorderLayout(0, 8));
+        south.add(feedPane, BorderLayout.CENTER);
+        south.add(clusterFooter, BorderLayout.SOUTH);
+        cluster.add(south, BorderLayout.SOUTH);
+        return cluster;
+    }
+
+    // One poll off the EDT: snapshot the cluster, diff against the last view,
+    // then paint the table and feed on the event thread.
+    private void refreshClusterNow() {
+        if (!clusterPollInFlight.compareAndSet(false, true)) {
+            return;
+        }
+        new Thread(() -> {
+            try {
+                connectBackend();
+                ClusterMonitor.PollResult result = ClusterMonitor.pollWithEvents(bootstrap,
+                        (workerId, address) -> {
+                            try {
+                                Registry registry = LocateRegistry.getRegistry(
+                                        address.getRmiHost(), address.getRmiPort());
+                                return (WorkerRemote) registry.lookup("Worker" + workerId);
+                            } catch (Exception e) {
+                                return null;
+                            }
+                        }, eventSeqByWorker);
+                List<ClusterMonitor.ClusterEvent> heuristic;
+                synchronized (clusterLock) {
+                    heuristic = ClusterMonitor.diff(lastClusterSnapshot, result.snapshot(),
+                            result.exactKindsByWorker());
+                    lastClusterSnapshot = result.snapshot();
+                }
+                // Exact worker events first by timestamp; heuristic lines fill the gaps.
+                List<ClusterMonitor.ClusterEvent> all =
+                        new ArrayList<>(result.workerEvents());
+                all.addAll(heuristic);
+                all.sort((a, b) -> a.time().compareTo(b.time()));
+                SwingUtilities.invokeLater(() -> renderClusterSnapshot(result.snapshot(), all));
+            } catch (Exception e) {
+                SwingUtilities.invokeLater(() ->
+                        clusterStatusLabel.setText("Cluster unreachable — retrying..."));
+            } finally {
+                clusterPollInFlight.set(false);
+            }
+        }, "cluster-monitor-poll").start();
+    }
+
+    // Runs on the event thread: rebuilds the worker table and appends feed lines.
+    private void renderClusterSnapshot(ClusterMonitor.ClusterSnapshot snapshot,
+            List<ClusterMonitor.ClusterEvent> events) {
+        clusterModel.setRowCount(0);
+        for (ClusterMonitor.WorkerRow row : snapshot.rows()) {
+            clusterModel.addRow(new Object[]{
+                    "Worker " + row.workerId(),
+                    ClusterMonitor.roleOf(row),
+                    row.coordinatorView() == -1 ? "none" : "Worker " + row.coordinatorView(),
+                    formatNeighbourIds(row.neighbours()),
+                    row.alive() ? row.jac() : "-",
+                    row.alive() ? "Alive" : "Unreachable"
+            });
+        }
+        DateTimeFormatter clock =
+                DateTimeFormatter.ofPattern("HH:mm:ss");
+        for (ClusterMonitor.ClusterEvent event : events) {
+            clusterFeedLines.addLast("[" + clock.format(event.time()
+                    .atZone(ZoneId.systemDefault())) + "] " + event.text());
+        }
+        while (clusterFeedLines.size() > CLUSTER_FEED_MAX_LINES) {
+            clusterFeedLines.removeFirst();
+        }
+        clusterFeed.setText(String.join("\n", clusterFeedLines));
+        clusterFeed.setCaretPosition(clusterFeed.getDocument().getLength());
+        int workers = snapshot.rows().size();
+        String coordinator = snapshot.consensusCoordinator() == -1
+                ? "no coordinator yet" : "coordinator Worker " + snapshot.consensusCoordinator();
+        clusterStatusLabel.setText("Updated " + clock.format(LocalTime.now())
+                + " · " + workers + (workers == 1 ? " worker" : " workers") + " · " + coordinator);
+    }
+
+    private static String formatNeighbourIds(Set<Integer> ids) {
+        List<Integer> sorted = new ArrayList<>(ids);
+        Collections.sort(sorted);
+        return sorted.toString();
     }
 
     // Groups components without covering the parent panel's background colour.

@@ -5,6 +5,7 @@ import com.cs324.common.TaskAssignment;
 import com.cs324.common.ClientRemote;
 import com.cs324.common.Constants;
 import com.cs324.common.WorkerAddress;
+import com.cs324.common.WorkerEvent;
 import com.cs324.common.WorkerRemote;
 import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
@@ -15,7 +16,9 @@ import java.util.Map;
 import java.util.Set;
 import java.util.List;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -62,6 +65,10 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     private final Map<Integer, Set<Integer>> twoHop = new ConcurrentHashMap<>();
     // Once-guard so concurrent failures on the same dead id rewire exactly once.
     private final Set<Integer> repairInProgress = ConcurrentHashMap.newKeySet();
+    // Recent happenings for the GUI feed; a bounded ring so a chatty cluster cannot leak memory.
+    private final Deque<WorkerEvent> recentEvents = new ArrayDeque<>();
+    private static final int MAX_RECENT_EVENTS = 64;
+    private final AtomicLong eventSeq = new AtomicLong(0);
 
     // Composite key, so two workers' results for one job cannot overwrite each other.
     private record JobResultKey(int jobId, int workerId) implements java.io.Serializable {}
@@ -139,9 +146,54 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
         return Set.copyOf(neighbours.keySet());
     }
 
-    // Local accessor for shutdown/leave handoff; null when the edge is already gone.
-    public WorkerRemote getNeighbourStub(int neighbourId) {
-        return neighbours.get(neighbourId);
+    // Appends one happening to the ring, dropping the oldest past the cap.
+    private void recordEvent(String kind, String detail) {
+        WorkerEvent event = new WorkerEvent(eventSeq.getAndIncrement(), id,
+                System.currentTimeMillis(), kind, detail);
+        synchronized (recentEvents) {
+            recentEvents.addLast(event);
+            while (recentEvents.size() > MAX_RECENT_EVENTS) {
+                recentEvents.removeFirst();
+            }
+        }
+    }
+
+    @Override
+    public List<WorkerEvent> getRecentEvents(long afterSeq) throws RemoteException {
+        synchronized (recentEvents) {
+            List<WorkerEvent> out = new ArrayList<>();
+            for (WorkerEvent event : recentEvents) {
+                if (event.seq() > afterSeq) {
+                    out.add(event);
+                }
+            }
+            return out;
+        }
+    }
+
+    // Clean-exit handoff: hands our neighbour set to every neighbour so survivors
+    // chain to a grandparent immediately. Best effort; crashes skip this entirely
+    // and rely on survivor-side failure detection instead.
+    public int notifyNeighboursOfLeaving() {
+        Set<Integer> mine = Set.copyOf(neighbours.keySet());
+        int notified = 0;
+        for (WorkerRemote peer : new ArrayList<>(neighbours.values())) {
+            try {
+                peer.notifyLeaving(id, mine);
+                notified++;
+            } catch (Exception ignored) {
+                // best effort on shutdown
+            }
+        }
+        recordEvent(WorkerEvent.LEAVING,
+                "leaving; handed neighbours " + sortedIds(mine) + " to " + notified + " neighbour(s)");
+        return notified;
+    }
+
+    private static List<Integer> sortedIds(Set<Integer> ids) {
+        List<Integer> sorted = new ArrayList<>(ids);
+        Collections.sort(sorted);
+        return sorted;
     }
 
     public int getJobsCoordinatedInTerm() {
@@ -163,6 +215,8 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
 
         int currentJac = jobAllocationCounter.get();
         ElectionState election = new ElectionState(this.id, this.id, currentJac);
+        recordEvent(WorkerEvent.ELECTION_STARTED,
+                "started election wave " + messageId + " (JAC " + currentJac + ")");
 
         for (Integer neighborId : neighbours.keySet()) {
             election.pendingChildren.add(neighborId);
@@ -303,6 +357,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     public void adoptCoordinator(int coordinatorId, long messageId) {
         seenCoordinatorMessageIds.add(messageId);
         this.currentCoordinatorId = coordinatorId;
+        recordEvent(WorkerEvent.COORDINATOR_ADOPTED, "adopted coordinator Worker " + coordinatorId);
         if (coordinatorId == this.id) {
             termJobsCoordinated.set(0);
         }
@@ -354,6 +409,8 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
             if (election.bestCandidateId == this.id) {
                 termJobsCoordinated.set(0);
             }
+            recordEvent(WorkerEvent.COORDINATOR_ANNOUNCED, "announced coordinator Worker "
+                    + election.bestCandidateId + " (wave " + messageId + ")");
             // Offset, so a coordinator announcement can never collide with an election id.
             long coordMessageId = messageId + 1000000L;
             // Record before broadcasting, or our own announcement returns and resets the term.
@@ -388,6 +445,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
             neighbours.put(newWorker, stub);
             // Seed the 2-hop cache while the peer is alive; best effort, never fails the connect.
             refreshTwoHop(newWorker, stub);
+            recordEvent(WorkerEvent.NEIGHBOUR_ADDED, "linked Worker " + newWorker);
         } catch (NotBoundException e) {
             throw new RemoteException("Failed to look up new neighbour", e);
         }
@@ -399,7 +457,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
         if (leaverNeighbours != null) {
             twoHop.put(leaverId, Set.copyOf(leaverNeighbours));
         }
-        handleDeadNeighbour(leaverId);
+        handleDeadNeighbour(leaverId, "leave");
     }
 
     // Best-effort fetch of a neighbour's neighbour set; a failure means the peer just died.
@@ -417,11 +475,17 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     // Survivor-side repair: prune the dead edge, then chain to one grandparent (smallest id first).
     // Falls back to any live Bootstrap peer when no grandparent is known or reachable.
     void handleDeadNeighbour(int deadId) {
+        handleDeadNeighbour(deadId, "unreachable");
+    }
+
+    void handleDeadNeighbour(int deadId, String cause) {
         if (deadId == id || !repairInProgress.add(deadId)) {
             return;
         }
         try {
             neighbours.remove(deadId);
+            recordEvent(WorkerEvent.NEIGHBOUR_REMOVED,
+                    "dropped Worker " + deadId + " (" + cause + ")");
             Set<Integer> known = twoHop.remove(deadId);
             List<Integer> candidates = new ArrayList<>();
             if (known != null) {
@@ -433,7 +497,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
                 Collections.sort(candidates);
             }
             for (int candidate : candidates) {
-                if (tryRepairEdge(candidate)) {
+                if (tryRepairEdge(candidate, deadId)) {
                     return;
                 }
             }
@@ -443,7 +507,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
                     List<Integer> active = new ArrayList<>(bootstrap.getActiveWorkerIds());
                     Collections.sort(active);
                     for (int candidate : active) {
-                        if (isRepairCandidate(candidate, deadId) && tryRepairEdge(candidate)) {
+                        if (isRepairCandidate(candidate, deadId) && tryRepairEdge(candidate, deadId)) {
                             return;
                         }
                     }
@@ -462,7 +526,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     }
 
     // Resolves one candidate through Bootstrap and links it bidirectionally; false = try next.
-    private boolean tryRepairEdge(int candidate) {
+    private boolean tryRepairEdge(int candidate, int deadId) {
         if (bootstrap == null) {
             return false;
         }
@@ -475,6 +539,8 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
             WorkerRemote stub = (WorkerRemote) registry.lookup("Worker" + candidate);
             neighbours.put(candidate, stub);
             refreshTwoHop(candidate, stub);
+            recordEvent(WorkerEvent.NEIGHBOUR_ADDED,
+                    "chained to Worker " + candidate + " past Worker " + deadId);
             try {
                 stub.connectAsNeighbour(id, localHostOrDefault(), localPortOrDefault(address));
             } catch (Exception ignored) {
@@ -513,6 +579,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
         if (!seenJobIds.add(jobId)) {
             return;
         }
+        recordEvent(WorkerEvent.TASK_RECEIVED, "job " + jobId + " slice received (" + jobType + ")");
 
         // A TaskAssignment carries the chunk plus the coordinator to report the result to.
         final Object calculationPayload = payload instanceof TaskAssignment assignment
@@ -629,6 +696,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
             int targetId = participants.get(i);
             if (targetId == id) {
                 final Object selfChunk = chunk;
+                recordEvent(WorkerEvent.TASK_DISPATCHED, "job " + jobId + " slice kept (own chunk)");
                 // Our own slice runs on the pool too, so the caller's RMI thread is never blocked.
                 executor.submit(() -> {
                     Object result;
@@ -648,6 +716,8 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
                 WorkerRemote stub = available.get(targetId);
                 if (stub == null) {
                     // In the directory but unreachable: compute its slice here rather than stall.
+                    recordEvent(WorkerEvent.TASK_DISPATCHED, "job " + jobId + " slice of Worker "
+                            + targetId + " computed locally (peer unreachable)");
                     final Object slice = chunk;
                     executor.submit(() -> {
                         Object fallback;
@@ -667,9 +737,13 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
                 }
                 try {
                     stub.assignTask(jobId, typeSnapshot, new TaskAssignment(chunk, callback));
+                    recordEvent(WorkerEvent.TASK_DISPATCHED,
+                            "job " + jobId + " slice -> Worker " + targetId);
                 } catch (RemoteException e) {
                     // Drop the dead peer, rewire past it, and cover its slice locally.
                     handleDeadNeighbour(targetId);
+                    recordEvent(WorkerEvent.TASK_DISPATCHED, "job " + jobId + " slice of Worker "
+                            + targetId + " computed locally (peer unreachable)");
                     final Object slice = chunk;
                     executor.submit(() -> {
                         Object fallback;

@@ -1,5 +1,6 @@
 package com.cs324.test;
 
+import com.cs324.common.WorkerEvent;
 import com.cs324.common.WorkerRemote;
 
 import java.rmi.RemoteException;
@@ -123,6 +124,11 @@ public class RecordingWorkerRemote extends UnicastRemoteObject implements Worker
     @Override
     public void notifyLeaving(int leaverId, Set<Integer> leaverNeighbours) throws RemoteException {
         calls.add("leaving|" + leaverId);
+    }
+
+    @Override
+    public List<WorkerEvent> getRecentEvents(long afterSeq) throws RemoteException {
+        return List.of();
     }
 
     @Override

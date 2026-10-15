@@ -188,6 +188,22 @@ it, submits MAX/PRIMESUM/PRIMECOUNT jobs (PrimeRange payloads for PRIMESUM), and
 fills in the result cell once the coordinator delivers the aggregated answer.
 If the coordinator rotates mid-submit it discovers the new one and retries.
 
+### Cluster activity card
+
+Below the job history, the client shows a **Cluster activity** card: a live worker
+table (`Worker | Role | Coordinator view | Neighbours | JAC | Status`) and a
+timestamped feed of happenings. Each worker keeps a 64-entry ring of its own
+events — elections started and announced, coordinators adopted, neighbour edges
+added/dropped (with the cause), every job slice dispatched and received, and
+clean-exit farewells — exposed via `WorkerRemote.getRecentEvents(seq)`. The
+client polls every 2 seconds off the event thread (plus a manual Refresh button,
+`Alt+R`), drains only unseen sequences, and falls back to snapshot-diff lines
+(joins, leaves, consensus changes) for what workers cannot self-report; a
+snapshot heuristic stays silent whenever the exact worker event already tells
+that story. Kill a middle worker and watch the exact `dropped … (unreachable)`
++ `chained to …` lines appear, and submit a job to see each slice dispatched and
+received per worker.
+
 ## Computation
 
 `WorkerTaskCalculator` handles three calculations:
