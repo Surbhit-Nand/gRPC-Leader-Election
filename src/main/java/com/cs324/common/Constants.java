@@ -14,4 +14,10 @@ public class Constants {
 
     // Settle time after startup, so an already-formed cluster never holds a pointless election.
     public static final int STARTUP_ELECTION_DELAY_MS = 3000;
+
+    // Base RMI port for auto-assigned workers; scan upward until createRegistry succeeds.
+    public static final int WORKER_BASE_RMI_PORT = 3500;
+
+    // How many ports to probe starting from the base before giving up.
+    public static final int WORKER_MAX_PORT_TRIES = 1000;
 }

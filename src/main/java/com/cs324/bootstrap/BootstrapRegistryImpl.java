@@ -2,6 +2,7 @@ package com.cs324.bootstrap;
 
 import com.cs324.common.BootstrapRemote;
 import com.cs324.common.WorkerAddress;
+import com.cs324.common.WorkerRegistration;
 import com.cs324.common.WorkerRemote;
 
 import java.rmi.NotBoundException;
@@ -26,6 +27,11 @@ public class BootstrapRegistryImpl extends UnicastRemoteObject implements Bootst
     private final java.util.concurrent.atomic.AtomicLong nextJobId =
             new java.util.concurrent.atomic.AtomicLong(1);
 
+    // Monotonic worker ids for auto-registration; never reused (deregister does not rewind it).
+    // In-memory only, so a Bootstrap restart resets the sequence to 1 alongside the directory.
+    private final java.util.concurrent.atomic.AtomicInteger nextWorkerId =
+            new java.util.concurrent.atomic.AtomicInteger(1);
+
     @Override
     public int allocateJobId() throws RemoteException {
         // Allocate once for the whole cluster, rather than once per client window.
@@ -41,6 +47,36 @@ public class BootstrapRegistryImpl extends UnicastRemoteObject implements Bootst
 
     @Override
     public WorkerRemote registerWorker(int workerId, String rmiHost, int rmiPort) throws RemoteException {
+        WorkerRemote peerStub = findLivePeer();
+        // putIfAbsent makes duplicate-id detection atomic; containsKey+put lost updates.
+        WorkerAddress prev = activeWorkers.putIfAbsent(workerId, new WorkerAddress(rmiHost, rmiPort));
+        // Ids must be unique, so a collision is an error the caller must fix.
+        if (prev != null) {
+            throw new RemoteException("Duplicate worker id " + workerId + " - already registered");
+        }
+        // Keep the auto counter past any manual id so a future auto-assign cannot collide.
+        nextWorkerId.updateAndGet(cur -> Math.max(cur, workerId + 1));
+        return peerStub;
+    }
+
+    @Override
+    public synchronized WorkerRegistration registerWorkerAuto(String rmiHost, int rmiPort)
+            throws RemoteException {
+        // Peer first so the newcomer is never handed itself; allocation + insert are one
+        // atomic step, so a crash cannot burn an id without registering it.
+        WorkerRemote peerStub = findLivePeer();
+        int workerId = nextWorkerId.getAndIncrement();
+        activeWorkers.put(workerId, new WorkerAddress(rmiHost, rmiPort));
+        return new WorkerRegistration(workerId, peerStub);
+    }
+
+    @Override
+    public List<Integer> getAllocatedWorkerIds() throws RemoteException {
+        return getActiveWorkerIds();
+    }
+
+    // Shared peer-pick for manual and auto registration: shuffled snapshot, first live wins.
+    private WorkerRemote findLivePeer() throws RemoteException {
         // Copy workers before picking a peer, so the newcomer is never handed itself.
         List<Map.Entry<Integer, WorkerAddress>> snapshot = new ArrayList<>(activeWorkers.entrySet());
         // Shuffled per call, so joins are not biased towards the lowest worker id.
@@ -64,13 +100,6 @@ public class BootstrapRegistryImpl extends UnicastRemoteObject implements Bootst
             } catch (RemoteException e) {
                 // Peer unreachable right now: try the next candidate.
             }
-        }
-
-        // putIfAbsent makes duplicate-id detection atomic; containsKey+put lost updates.
-        WorkerAddress prev = activeWorkers.putIfAbsent(workerId, new WorkerAddress(rmiHost, rmiPort));
-        // Ids must be unique, so a collision is an error the caller must fix.
-        if (prev != null) {
-            throw new RemoteException("Duplicate worker id " + workerId + " - already registered");
         }
         return peerStub;
     }

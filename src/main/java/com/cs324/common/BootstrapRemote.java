@@ -19,6 +19,14 @@ public interface BootstrapRemote extends Remote {
     // Lets a coordinator reach every worker, not only its own neighbours.
     List<Integer> getActiveWorkerIds() throws RemoteException;
 
+    // Automatic registration: bootstrap allocates a monotonic id, records the
+    // worker address, and returns the id plus one live peer to join (null if first).
+    // Single call so allocation and directory insert are atomic (no burned ids on crash).
+    WorkerRegistration registerWorkerAuto(String rmiHost, int rmiPort) throws RemoteException;
+
+    // All ids ever handed out that are still registered (debug/observability).
+    List<Integer> getAllocatedWorkerIds() throws RemoteException;
+
     // Address lookup so a joiner can reach the peer stub it was handed; null if unknown.
     com.cs324.common.WorkerAddress getWorkerAddress(int workerId) throws RemoteException;
 }
