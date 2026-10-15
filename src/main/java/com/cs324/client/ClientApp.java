@@ -725,6 +725,18 @@ public class ClientApp extends JFrame {
             return;
         }
 
+        // Wide prime ranges run long: warn first, still allow on confirm.
+        String rangeWarning = RangeWarning.warningFor(operation, values);
+        if (rangeWarning != null) {
+            int answer = JOptionPane.showConfirmDialog(
+                    this, rangeWarning, "Large range",
+                    JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+            if (answer != JOptionPane.YES_OPTION) {
+                statusLabel.setText("Submission cancelled — input kept.");
+                return;
+            }
+        }
+
         String inputSummary = "PRIMESUM".equals(operation)
                 ? values[0] + " to " + values[1]
                 : values.length + " numbers";

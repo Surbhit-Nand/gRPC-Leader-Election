@@ -270,6 +270,16 @@ With four registered workers, PRIMESUM(1,1000) splits into 1-250, 251-500,
 501-750 and 751-1000 and combines to **76127**. The coordinator takes the first
 chunk. Smaller lists/ranges may use fewer workers to avoid empty chunks.
 
+### Wide ranges (up to 1B width)
+
+`PRIMESUM` accepts any ascending `start,end` within the 32-bit int range, and
+widths up to a billion submit end-to-end: the splitter uses 64-bit arithmetic
+so chunk boundaries stay exact, and sums/counts still fit their result types.
+Only wall-clock time stands in the way (trial division to √n per number), so
+the client warns before submitting — above 1M width it discloses minutes, above
+100M hours — and proceeds on confirm. Nothing is capped: a 1B-wide range runs
+for hours across the workers rather than failing.
+
 `ClusterDistributionTest` uses four workers connected in a chain over RMI. It
 checks every worker's participation, the assignment's range example, waiting for
 a delayed worker, result delivery after a leader change, and two concurrent client

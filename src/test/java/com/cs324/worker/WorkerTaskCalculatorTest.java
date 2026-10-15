@@ -113,6 +113,10 @@ class WorkerTaskCalculatorTest {
     // The integer extremes must not overflow trial division or the range arithmetic.
     void primeChecksAndRangeEndpointsHandleIntegerLimits() {
         assertTrue(WorkerTaskCalculator.isPrime(Integer.MAX_VALUE));
+        // Single values at billion magnitude stay instant: trial division to sqrt(1e9).
+        assertTrue(WorkerTaskCalculator.isPrime(1_000_000_007));
+        assertFalse(WorkerTaskCalculator.isPrime(1_000_000_000));
+        assertFalse(WorkerTaskCalculator.isPrime(2_147_483_646));
         // 561 is a Carmichael number: it fools naive divisibility tests but is composite.
         for (int value : new int[]{Integer.MIN_VALUE, -2, 0, 1, 4, 9, 121, 561, 2147395600}) {
             assertFalse(WorkerTaskCalculator.isPrime(value));

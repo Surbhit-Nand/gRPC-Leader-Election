@@ -34,8 +34,7 @@ class WorkerTaskDistributorTest {
     }
 
     // Bad input is rejected up front rather than yielding a chunk that fails later.
-    @Test void validatesBeforeDispatchAndCopiesLists() {
-        assertThrows(IllegalArgumentException.class, () -> WorkerTaskDistributor.split("MAX", new int[0], 2));
+    @Test void validatesBeforeDispatchAndCopiesLists() {        assertThrows(IllegalArgumentException.class, () -> WorkerTaskDistributor.split("MAX", new int[0], 2));
         assertThrows(IllegalArgumentException.class, () -> WorkerTaskDistributor.split("MAX", List.of(2L), 2));
         assertThrows(IllegalArgumentException.class, () -> WorkerTaskDistributor.split("MAX", new PrimeRange(1, 2), 2));
         assertThrows(IllegalArgumentException.class, () -> WorkerTaskDistributor.split("BAD", new int[]{1}, 2));
@@ -45,5 +44,26 @@ class WorkerTaskDistributorTest {
         assertArrayEquals(new int[]{2, 7}, (int[]) chunks.getFirst());
         // An empty input is fine for the additive operations; it just gets one chunk.
         assertEquals(1, WorkerTaskDistributor.split("PRIMESUM", new int[0], 3).size());
+    }
+
+    // Billion-wide ranges split into contiguous, gapless, fully covering chunks.
+    // Pure endpoint math, so it proves the shape without computing a billion primes.
+    @Test void billionWideRangesSplitContiguously() {
+        for (PrimeRange range : List.of(
+                new PrimeRange(1, 1_000_000_000),
+                new PrimeRange(1_147_483_647, Integer.MAX_VALUE))) {
+            List<Object> chunks = WorkerTaskDistributor.split("PRIMESUM", range, 4);
+            assertEquals(4, chunks.size());
+            long cursor = range.start();
+            for (Object chunk : chunks) {
+                PrimeRange part = (PrimeRange) chunk;
+                // Each chunk starts where the previous ended: no gaps, no overlaps.
+                assertEquals(cursor, part.start());
+                assertTrue(part.end() >= part.start());
+                cursor = (long) part.end() + 1;
+            }
+            // The last chunk ends exactly on the range end: full coverage.
+            assertEquals((long) range.end() + 1, cursor);
+        }
     }
 }
