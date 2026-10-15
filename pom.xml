@@ -59,7 +59,7 @@
             <id>worker</id>
             <properties>
                 <exec.mainClass>com.cs324.worker.WorkerNode</exec.mainClass>
-                <exec.args>1 3500 localhost 1099</exec.args>
+                <exec.args>localhost 1099</exec.args>
             </properties>
         </profile>
     </profiles>

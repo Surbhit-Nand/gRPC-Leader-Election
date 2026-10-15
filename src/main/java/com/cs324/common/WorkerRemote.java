@@ -2,6 +2,7 @@ package com.cs324.common;
 
 import java.rmi.Remote;
 import java.rmi.RemoteException;
+import java.util.Set;
 
 // RMI contract every Worker node implements: discovery, election, and job execution.
 public interface WorkerRemote extends Remote {
@@ -36,6 +37,13 @@ public interface WorkerRemote extends Remote {
 
     // Adds a peer; both sides call it, so the neighbour edge ends up bidirectional.
     void connectAsNeighbour(int newWorker, String rmiHost, int rmiPort) throws RemoteException;
+
+    // Direct neighbour ids, exposed over RMI so peers can seed their 2-hop repair cache.
+    Set<Integer> getNeighbourIds() throws RemoteException;
+
+    // Graceful-leave fast path: the leaver hands its neighbour set over before deregistering,
+    // so survivors can chain to a grandparent without waiting for a failure probe.
+    void notifyLeaving(int leaverId, Set<Integer> leaverNeighbours) throws RemoteException;
 
     // The winning candidate's verdict, relayed outward by every node that hears it.
     void receiveCoordinatorMessage(int coordinatorId, long messageId) throws RemoteException;

@@ -5,6 +5,7 @@ import com.cs324.common.WorkerRemote;
 import java.rmi.RemoteException;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 // Test double that records every remote call it receives.
@@ -112,6 +113,16 @@ public class RecordingWorkerRemote extends UnicastRemoteObject implements Worker
     @Override
     public void connectAsNeighbour(int newWorker, String rmiHost, int rmiPort) throws RemoteException {
         calls.add("connect|" + newWorker + "|" + rmiHost + "|" + rmiPort);
+    }
+
+    @Override
+    public Set<Integer> getNeighbourIds() throws RemoteException {
+        return Set.of();
+    }
+
+    @Override
+    public void notifyLeaving(int leaverId, Set<Integer> leaverNeighbours) throws RemoteException {
+        calls.add("leaving|" + leaverId);
     }
 
     @Override

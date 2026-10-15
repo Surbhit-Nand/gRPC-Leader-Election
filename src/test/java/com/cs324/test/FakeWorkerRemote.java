@@ -4,6 +4,7 @@ import com.cs324.common.WorkerRemote;
 
 import java.rmi.RemoteException;
 import java.rmi.server.UnicastRemoteObject;
+import java.util.Set;
 
 // Silent test double for WorkerRemote: only getId() carries meaning, the rest are no-ops.
 // Implemented in full so it can be bound in a real RMI registry and looked up by name.
@@ -63,6 +64,16 @@ public class FakeWorkerRemote extends UnicastRemoteObject implements WorkerRemot
 
     @Override
     public void connectAsNeighbour(int newWorker, String rmiHost, int rmiPort) throws RemoteException {
+        // not needed for these tests
+    }
+
+    @Override
+    public Set<Integer> getNeighbourIds() throws RemoteException {
+        return Set.of();
+    }
+
+    @Override
+    public void notifyLeaving(int leaverId, Set<Integer> leaverNeighbours) throws RemoteException {
         // not needed for these tests
     }
 

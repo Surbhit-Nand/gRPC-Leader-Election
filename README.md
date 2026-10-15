@@ -43,12 +43,17 @@ Bootstrap Node (start first, one only):
 java -cp target/classes com.cs324.bootstrap.BootstrapNode 1099
 ```
 
-Worker Node (one per terminal, unique id + port each time). The arguments are `workerId rmiPort bootstrapHost bootstrapPort`:
+Worker Node (one per terminal, no id/port typing). Bootstrap auto-assigns a monotonic
+worker id and the worker picks the first free RMI port from 3500 upward:
 
 ```
-java -cp target/classes com.cs324.worker.WorkerNode 1 3500 localhost 1099
-java -cp target/classes com.cs324.worker.WorkerNode 2 3501 localhost 1099
+java -cp target/classes com.cs324.worker.WorkerNode localhost 1099
+java -cp target/classes com.cs324.worker.WorkerNode localhost 1099
 ```
+
+Each run prints the assigned id, e.g. `Worker 1 bound as Worker1 on port 3500 (auto-assigned)`.
+Ids are never reused within one Bootstrap run (a middle id left by a departed worker stays
+empty); restarting Bootstrap resets the sequence to 1. Restart all workers together for a fresh run.
 
 **The cluster elects a coordinator by itself** about 3 seconds after the workers start, so there is nothing to trigger by hand. A worker that already knows a coordinator stays quiet. To force a fresh election at any time, press `[1]` in a worker's terminal.
 
@@ -68,9 +73,7 @@ Press **F5** (Run and Debug) and pick a configuration from `.vscode/launch.json`
 | Configuration | Main class | Arguments |
 | --- | --- | --- |
 | `Bootstrap Node (port 1099)` | `com.cs324.bootstrap.BootstrapNode` | `1099` |
-| `Worker 1 (id 1, port 3500)` | `com.cs324.worker.WorkerNode` | `1 3500 localhost 1099` |
-| `Worker 2 (id 2, port 3501)` | `com.cs324.worker.WorkerNode` | `2 3501 localhost 1099` |
-| `Worker 3 (id 3, port 3502)` | `com.cs324.worker.WorkerNode` | `3 3502 localhost 1099` |
+| `Worker (auto id+port)` | `com.cs324.worker.WorkerNode` | `localhost 1099` |
 | `Client App (callback port 1199)` | `com.cs324.client.ClientApp` | `localhost 1099 1199` |
 | `Client App 2 (callback port 1200)` | `com.cs324.client.ClientApp` | `localhost 1099 1200` |
 
@@ -80,18 +83,17 @@ Every configuration names an explicit main class, so the IDE never has to guess 
 
 NetBeans has no `nbactions.xml` in this repository, so the two shortcuts are **not** equivalent to the other IDEs:
 
-- **Shift+F6** (*Run File*) infers the main class from the file you have open, and passes no arguments. That is fine for `BootstrapNode` and `ClientApp`, which both fall back to the correct defaults (`localhost 1099 1199`). It does **not** work for `WorkerNode`: it needs four arguments and prints its usage line then exits with status 1 when they are missing.
+- **Shift+F6** (*Run File*) infers the main class from the file you have open, and passes no arguments. That is fine for `BootstrapNode`, `ClientApp` and now `WorkerNode` too, which all fall back to the correct defaults (`WorkerNode` auto-assigns id + port from 3500 and uses `localhost 1099`).
 - **F6** (*Run Project*) always runs the pom's default main class, `com.cs324.client.ClientApp`, with an empty `exec.args` - so it starts a client rather than whichever node you were editing.
 - To start a worker, set the arguments explicitly under *Project Properties -> Run*, or better create one run configuration per node via *Run -> Set Main Class -> Customize...*:
 
   | Main class | Arguments |
   | --- | --- |
   | `com.cs324.bootstrap.BootstrapNode` | `1099` |
-  | `com.cs324.worker.WorkerNode` | `1 3500 localhost 1099` |
-  | `com.cs324.worker.WorkerNode` | `2 3501 localhost 1099` |
+  | `com.cs324.worker.WorkerNode` | `localhost 1099` |
   | `com.cs324.client.ClientApp` | `localhost 1099 1199` |
 
-  Use a different `rmiPort` and `workerId` for each extra worker, and a different callback port for a second client.
+  Start one worker per run configuration; each auto-assigns its own id and port. Use a different callback port for a second client.
 - Register a **JDK 25 or newer** under *Tools -> Java Platforms*, because the pom targets `release 25`.
 - Once a run configuration is verified on one machine, NetBeans can export it to `nbactions.xml` in the project root so the whole team shares the same setup. This repository does not track one yet, so treat the table above as the source of truth.
 
@@ -102,7 +104,7 @@ The `client`, `bootstrap` and `worker` profiles only set the default `exec.mainC
 ```
 mvn -Pclient exec:java
 mvn -Pbootstrap exec:java
-mvn -Pworker exec:java -Dexec.args="2 3501 localhost 1099"
+mvn -Pworker exec:java
 ```
 
 For anything that has to keep running, fork a JVM with `exec:exec` (`%classpath` is replaced by Maven with the project classpath):
@@ -145,6 +147,7 @@ These are settled interpretations of ambiguous spec points. Keep implementations
 - **Coordinator failure detection uses heartbeats.** Workers periodically ping the current coordinator; a missed response is what triggers a new election. This is separate from the election-termination mechanism (echo-based, see election design notes).
 - **Fault tolerance is out of scope for this assignment.** No requirement to handle a worker or coordinator dying mid-job or mid-election — that's Assignment 2's focus.
 - **Neighbour connections are bidirectional.** When worker A connects to worker B (via a peer the Bootstrap Node introduced), both A and B add each other to their local neighbour lists — a successful RMI call is treated as the acknowledgement, no separate ack message needed.
+- **A departing worker never splits the cluster.** Survivors keep a 2-hop view (each neighbour's neighbour set, seeded on connect and refreshed on traffic). On a clean exit the leaver hands its neighbour set over via `notifyLeaving` before deregistering; on a crash the first failed send to the corpse triggers the same path: prune the dead edge and chain to the smallest-id grandparent, falling back to any live Bootstrap peer. One edge per orphan, deterministic pick, so no islands and no cliques.
 
 ---
 

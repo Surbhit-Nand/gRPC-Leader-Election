@@ -12,25 +12,9 @@
         {
             "type": "jdk",
             "request": "launch",
-            "name": "Worker 1 (id 1, port 3500)",
+            "name": "Worker (auto id+port)",
             "mainClass": "com.cs324.worker.WorkerNode",
-            "args": "1 3500 localhost 1099",
-            "console": "internalConsole"
-        },
-        {
-            "type": "jdk",
-            "request": "launch",
-            "name": "Worker 2 (id 2, port 3501)",
-            "mainClass": "com.cs324.worker.WorkerNode",
-            "args": "2 3501 localhost 1099",
-            "console": "internalConsole"
-        },
-        {
-            "type": "jdk",
-            "request": "launch",
-            "name": "Worker 3 (id 3, port 3502)",
-            "mainClass": "com.cs324.worker.WorkerNode",
-            "args": "3 3502 localhost 1099",
+            "args": "localhost 1099",
             "console": "internalConsole"
         },
         {
