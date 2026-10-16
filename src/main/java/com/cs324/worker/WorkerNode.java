@@ -6,7 +6,8 @@ import com.cs324.common.WorkerAddress;
 import com.cs324.common.WorkerRegistration;
 import com.cs324.common.WorkerRemote;
 import com.cs324.registry.proto.DeregisterRequest;
-import com.cs324.registry.proto.RegisterRequest;import com.cs324.registry.proto.RegisterResponse;
+import com.cs324.registry.proto.RegisterRequest;
+import com.cs324.registry.proto.RegisterResponse;
 import com.cs324.registry.proto.RegistryServiceGrpc;
 import com.cs324.registry.proto.WorkerEndpoint;
 import io.grpc.ManagedChannel;
@@ -86,10 +87,10 @@ public class WorkerNode {
                 // In --grpc mode the id comes from the RegistryService response;
                 // the peer endpoint is resolved back to an RMI stub because
                 // neighbour links stay on RMI until their owners migrate.
-                GrpcRegistration granted = null;
                 WorkerRemote peerStub;
                 if (grpcRegistry[0] != null) {
-                    granted = registerViaGrpc(grpcRegistry[0], -1, myHost, rmiPort);
+                    GrpcRegistration granted =
+                            registerViaGrpc(grpcRegistry[0], -1, myHost, rmiPort);
                     workerId = granted.workerId();
                     peerStub = lookupGrpcPeer(granted);
                 } else {
