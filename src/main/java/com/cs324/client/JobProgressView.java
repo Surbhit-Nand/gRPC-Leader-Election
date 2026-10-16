@@ -30,12 +30,45 @@ final class JobProgressView implements AutoCloseable {
     JobProgressView(DefaultTableModel jobs) { this.jobs = jobs; }
 
     void install(JTable table) {
+        if (table.getColumnCount() > 6)
+            ClientStyle.installDetailsAction(table, 6, row -> showDetails(table, row));
         table.getColumnModel().getColumn(5).setPreferredWidth(160);
         table.getColumnModel().getColumn(5).setCellRenderer((t, value, selected, focus, row, col) -> {
-            JProgressBar bar = new JProgressBar(0, 100);
-            bar.setStringPainted(true);
-            bar.setValue(value instanceof Number n ? n.intValue() : 0);
-            bar.setString(value instanceof Number ? value + "%" : String.valueOf(value));
+            JPanel bar = new JPanel() {
+                @Override protected void paintComponent(Graphics source) {
+                    super.paintComponent(source);
+                    Graphics2D g = ClientStyle.graphics(source);
+                    g.setFont(ClientStyle.BODY.deriveFont(12f));
+                    String text = value instanceof Number ? value + "%" : String.valueOf(value);
+                    int labelWidth = g.getFontMetrics().stringWidth(text) + 10;
+                    int width = Math.max(0, getWidth() - labelWidth - 12);
+                    int modelRow = t.convertRowIndexToModel(row);
+                    JobProgress snapshot = snapshots.get(modelRow);
+                    int y = 5;
+                    g.setColor(new Color(220, 233, 255));
+                    g.fillRoundRect(4, y, width, 14, 14, 14);
+                    g.setColor(Color.WHITE);
+                    g.fillRoundRect(6, y + 2, Math.max(0, width - 4), 10, 10, 10);
+                    int percent = value instanceof Number n ? Math.clamp(n.intValue(), 0, 100) : 0;
+                    int completed = (int) (Math.max(0, width - 6) * percent / 100.0);
+                    g.setPaint(percent == 100
+                            ? new GradientPaint(0, y, new Color(45, 211, 156), 0, y + 14, new Color(16, 177, 119))
+                            : new GradientPaint(0, y, new Color(80, 197, 255), 0, y + 14, ClientStyle.BLUE));
+                    g.fillRoundRect(7, y + 2, completed, 10, 10, 10);
+                    g.setColor(ClientStyle.INK);
+                    g.drawString(text, width + 10, y + 12);
+                    if (snapshot != null) {
+                        long total = snapshot.getWorkersList().stream().mapToLong(WorkerProgress::getTotalUnits).sum();
+                        long done = snapshot.getWorkersList().stream().mapToLong(WorkerProgress::getCompletedUnits).sum();
+                        g.setFont(ClientStyle.BODY.deriveFont(9f));
+                        g.setColor(ClientStyle.MUTED);
+                        g.drawString(String.format("%,d / %,d units", done, total), 5, y + 27);
+                    }
+                    g.dispose();
+                }
+            };
+            bar.setBackground(selected ? t.getSelectionBackground() : row % 2 == 0 ? Color.WHITE : new Color(242, 247, 255));
+            bar.getAccessibleContext().setAccessibleName("Progress: " + value);
             bar.setToolTipText("Click to see completed work by worker");
             return bar;
         });

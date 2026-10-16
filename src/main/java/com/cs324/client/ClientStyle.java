@@ -8,12 +8,12 @@ import java.awt.geom.Path2D;
 // Static style and painting helper holder for the client; it carries no job logic.
 final class ClientStyle {
     // One palette and one font family, so no component can drift out of theme.
-    static final Color BACKGROUND = new Color(244, 248, 255);
+    static final Color BACKGROUND = new Color(237, 245, 255);
     static final Color INK = new Color(14, 28, 65);
     static final Color MUTED = new Color(91, 109, 151);
     static final Color LINE = new Color(213, 222, 242);
-    static final Color BLUE = new Color(72, 91, 211);
-    static final Color LIGHT_BLUE = new Color(235, 240, 255);
+    static final Color BLUE = new Color(39, 127, 255);
+    static final Color LIGHT_BLUE = new Color(232, 242, 255);
     static final Font BODY = new Font("Segoe UI", Font.PLAIN, 14);
 
     // Never instantiated: every widget and constant here is static.
@@ -21,7 +21,7 @@ final class ClientStyle {
 
     // Scrollable card host, so a short window scrolls the cards instead of crushing them.
     static final class Workspace extends JPanel implements Scrollable {
-        Workspace() { super(new BorderLayout(0, 14)); setOpaque(false); }
+        Workspace() { super(new BorderLayout(0, 10)); setOpaque(false); }
         public Dimension getPreferredScrollableViewportSize() { return getPreferredSize(); }
         public int getScrollableUnitIncrement(Rectangle visible, int orientation, int direction) { return 20; }
         public int getScrollableBlockIncrement(Rectangle visible, int orientation, int direction) {
@@ -60,7 +60,7 @@ final class ClientStyle {
             }
         };
         panel.setOpaque(false);
-        panel.setBorder(BorderFactory.createEmptyBorder(20, 24, 24, 24));
+        panel.setBorder(BorderFactory.createEmptyBorder(10, 14, 12, 14));
         return panel;
     }
 
@@ -148,7 +148,7 @@ final class ClientStyle {
                 Graphics2D g = graphics(source);
                 boolean pressed = getModel().isPressed();
                 boolean hover = getModel().isRollover();
-                Color top = primary ? new Color(84, 103, 228) : new Color(247, 249, 255);
+                Color top = primary ? new Color(66, 164, 255) : new Color(250, 252, 255);
                 Color bottom = primary ? BLUE : new Color(238, 243, 255);
                 // Hover and press darken the gradient, so the button reads as interactive.
                 if (pressed || hover) { top = primary ? BLUE.darker() : LIGHT_BLUE; }
@@ -170,10 +170,10 @@ final class ClientStyle {
         button.setContentAreaFilled(false);
         button.setBorderPainted(false);
         button.setFocusPainted(false);
-        button.setFont(BODY.deriveFont(Font.BOLD));
+        button.setFont(BODY.deriveFont(Font.BOLD, 12f));
         button.setForeground(primary ? Color.WHITE : new Color(54, 76, 141));
         button.setIconTextGap(10);
-        button.setBorder(BorderFactory.createEmptyBorder(12, 18, 12, 18));
+        button.setBorder(BorderFactory.createEmptyBorder(6, 12, 6, 12));
         button.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         return button;
     }
@@ -193,6 +193,18 @@ final class ClientStyle {
                 g.setStroke(new BasicStroke(1.8f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
                 // An unknown name falls through to the default document glyph.
                 switch (name) {
+                    case "refresh" -> {
+                        g.drawArc(4, 4, 16, 16, 35, 270);
+                        g.drawPolyline(new int[]{15, 21, 21}, new int[]{4, 4, 10}, 3);
+                    }
+                    case "network" -> {
+                        g.drawLine(12, 5, 5, 18); g.drawLine(12, 5, 20, 18); g.drawLine(5, 18, 20, 18);
+                        g.fillOval(8, 1, 8, 8); g.fillOval(0, 14, 8, 8); g.fillOval(16, 14, 8, 8);
+                    }
+                    case "users" -> {
+                        g.fillOval(5, 3, 7, 7); g.fillOval(15, 4, 6, 6);
+                        g.fillRoundRect(2, 12, 13, 10, 7, 7); g.fillRoundRect(16, 12, 7, 9, 5, 5);
+                    }
                     case "play" -> g.fillPolygon(new int[]{6, 6, 20}, new int[]{3, 21, 12}, 3);
                     case "folder" -> {
                         Path2D p = new Path2D.Double();
@@ -243,16 +255,129 @@ final class ClientStyle {
 
     // Section icon inside a tinted circle, matching the heading design.
     static JLabel badge(String symbol) {
-        JLabel badge = new JLabel(icon(symbol, 24, BLUE), SwingConstants.CENTER) {
+        JLabel badge = new JLabel(icon(symbol, 20, BLUE), SwingConstants.CENTER) {
             @Override
             // Tinted disc painted before the label, so the glyph sits inside a badge.
             protected void paintComponent(Graphics source) {
                 Graphics2D g = graphics(source);
-                g.setColor(LIGHT_BLUE); g.fillOval(0, 0, 48, 48); g.dispose();
+                g.setColor(LIGHT_BLUE); g.fillOval(0, 0, 36, 36); g.dispose();
                 super.paintComponent(source);
             }
         };
-        badge.setPreferredSize(new Dimension(48, 48));
+        badge.setPreferredSize(new Dimension(36, 36));
         return badge;
+    }
+
+    static void styleTableHeader(JTable table) {
+        table.getTableHeader().setPreferredSize(new Dimension(0, 30));
+        table.getTableHeader().setDefaultRenderer(new javax.swing.table.DefaultTableCellRenderer() {
+            @Override public Component getTableCellRendererComponent(JTable t, Object value,
+                    boolean selected, boolean focus, int row, int column) {
+                super.getTableCellRendererComponent(t, value, selected, focus, row, column);
+                setBackground(LIGHT_BLUE);
+                setForeground(MUTED);
+                setFont(BODY.deriveFont(Font.BOLD, 10f));
+                setBorder(BorderFactory.createEmptyBorder(0, 10, 0, 10));
+                return this;
+            }
+        });
+    }
+
+    /** A real cell editor makes the action usable by mouse and keyboard. */
+    static void installDetailsAction(JTable table, int column, java.util.function.IntConsumer action) {
+        table.getColumnModel().getColumn(column).setCellRenderer((t, value, selected, focus, row, col) -> {
+            JPanel cell = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 3));
+            cell.setBackground(selected ? t.getSelectionBackground() : row % 2 == 0 ? Color.WHITE : new Color(248, 250, 255));
+            JButton view = button("View", "eye", false);
+            view.setFont(BODY.deriveFont(11f));
+            view.setBorder(BorderFactory.createEmptyBorder(3, 7, 3, 7));
+            cell.add(view);
+            return cell;
+        });
+        class ActionEditor extends AbstractCellEditor implements javax.swing.table.TableCellEditor {
+            final JButton button = button("View", "eye", false);
+            int modelRow;
+            ActionEditor() {
+                button.addActionListener(event -> {
+                    int selectedRow = modelRow;
+                    fireEditingCanceled();
+                    action.accept(selectedRow);
+                });
+            }
+            public Object getCellEditorValue() { return null; }
+            public Component getTableCellEditorComponent(JTable t, Object value,
+                    boolean selected, int row, int col) {
+                modelRow = t.convertRowIndexToModel(row);
+                return button;
+            }
+        }
+        table.getColumnModel().getColumn(column).setCellEditor(new ActionEditor());
+    }
+
+    static final class TagRenderer extends javax.swing.table.DefaultTableCellRenderer {
+        private Color tint;
+        @Override public Component getTableCellRendererComponent(JTable table, Object value,
+                boolean selected, boolean focus, int row, int column) {
+            super.getTableCellRendererComponent(table, value, selected, focus, row, column);
+            String text = value == null ? "" : value.toString();
+            tint = text.equals("PRIMESUM") || text.equals("PRIMECOUNT") ? new Color(232, 223, 255)
+                    : text.equals("Coordinator") ? new Color(255, 237, 185)
+                    : text.equals("Unreachable") ? new Color(255, 225, 230) : new Color(222, 237, 255);
+            setFont(BODY.deriveFont(Font.BOLD, 10f));
+            setForeground(INK);
+            setBackground(selected ? table.getSelectionBackground() : row % 2 == 0 ? Color.WHITE : new Color(248, 250, 255));
+            setBorder(BorderFactory.createEmptyBorder(0, 12, 0, 4));
+            setToolTipText(text);
+            return this;
+        }
+        @Override protected void paintComponent(Graphics source) {
+            Graphics2D g = graphics(source);
+            g.setColor(getBackground()); g.fillRect(0, 0, getWidth(), getHeight());
+            g.setFont(getFont());
+            g.setColor(tint);
+            g.fillRoundRect(7, (getHeight() - 19) / 2,
+                    Math.min(getWidth() - 10, g.getFontMetrics().stringWidth(getText()) + 12), 19, 7, 7);
+            g.dispose();
+            setOpaque(false);
+            super.paintComponent(source);
+        }
+    }
+
+    /** Status text is retained alongside colour for accessibility. */
+    static final class StatusRenderer extends JPanel implements javax.swing.table.TableCellRenderer {
+        private String text = "";
+        private Color foreground;
+        private Color fill;
+        StatusRenderer() { setFont(BODY.deriveFont(12f)); }
+        @Override public Component getTableCellRendererComponent(JTable table, Object value,
+                boolean selected, boolean focus, int row, int column) {
+            text = value == null ? "" : value.toString();
+            boolean success = text.equals("Completed") || text.equals("Alive");
+            boolean failed = text.equals("Failed") || text.equals("Unreachable");
+            foreground = success ? new Color(9, 145, 78) : failed ? new Color(200, 25, 75) : BLUE;
+            fill = success ? new Color(222, 248, 234) : failed ? new Color(255, 228, 237) : LIGHT_BLUE;
+            setBackground(selected ? table.getSelectionBackground() : row % 2 == 0 ? Color.WHITE : new Color(242, 247, 255));
+            setToolTipText(text);
+            getAccessibleContext().setAccessibleName(text);
+            return this;
+        }
+        @Override protected void paintComponent(Graphics source) {
+            super.paintComponent(source);
+            Graphics2D g = graphics(source);
+            g.setFont(getFont());
+            int width = Math.min(getWidth() - 14, g.getFontMetrics().stringWidth(text) + 34);
+            int y = (getHeight() - 22) / 2;
+            g.setColor(fill); g.fillRoundRect(7, y, width, 22, 22, 22);
+            g.setColor(foreground); g.fillOval(15, y + 5, 12, 12);
+            g.setColor(Color.WHITE);
+            if (text.equals("Completed") || text.equals("Alive")) {
+                g.setStroke(new BasicStroke(1.4f));
+                g.drawPolyline(new int[]{18, 20, 24}, new int[]{y + 11, y + 13, y + 9}, 3);
+            } else {
+                g.drawLine(21, y + 8, 21, y + 12); g.fillOval(20, y + 14, 2, 2);
+            }
+            g.setColor(foreground); g.drawString(text, 33, y + 15);
+            g.dispose();
+        }
     }
 }
