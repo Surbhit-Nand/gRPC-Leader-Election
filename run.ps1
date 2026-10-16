@@ -4,9 +4,10 @@
 # centralises that so a stale "target/classes"-only command cannot bite again.
 #
 # Usage (one terminal per node, project root):
-#   .\run.ps1 build                  # compile + fetch runtime jars into target/dependency
-#   .\run.ps1 bootstrap [port]       # default port 1099
-#   .\run.ps1 worker [host] [port]    # default localhost 1099 (id + RMI port auto-assigned)
+#   .\run.ps1 build                              # compile + fetch runtime jars into target/dependency
+#   .\run.ps1 bootstrap [rmiPort] [grpcPort]    # defaults 1099 50051
+#   .\run.ps1 worker [host] [port] [grpc]       # default localhost 1099 RMI; third arg "grpc"
+#                                               # or a grpc port number registers over gRPC instead
 #   .\run.ps1 client [host] [port] [callbackPort]  # default localhost 1099 1199
 $ErrorActionPreference = "Stop"
 
@@ -39,12 +40,21 @@ switch ($command) {
     }
     "bootstrap" {
         $port = if ($args.Count -ge 2) { $args[1] } else { "1099" }
-        & java -cp (Get-Classpath) com.cs324.bootstrap.BootstrapNode $port
+        $nodeArgs = @($port)
+        if ($args.Count -ge 3) { $nodeArgs += $args[2] }
+        & java -cp (Get-Classpath) com.cs324.bootstrap.BootstrapNode @nodeArgs
     }
     "worker" {
         $hostArg = if ($args.Count -ge 2) { $args[1] } else { "localhost" }
         $portArg = if ($args.Count -ge 3) { $args[2] } else { "1099" }
-        & java -cp (Get-Classpath) com.cs324.worker.WorkerNode $hostArg $portArg
+        # Third arg selects the registration transport: "grpc" for the default
+        # gRPC port, or a port number for --grpc-port (implies --grpc).
+        $nodeArgs = @($hostArg, $portArg)
+        if ($args.Count -ge 4) {
+            if ($args[3] -eq "grpc") { $nodeArgs = @("--grpc") + $nodeArgs }
+            else { $nodeArgs = @("--grpc-port", $args[3]) + $nodeArgs }
+        }
+        & java -cp (Get-Classpath) com.cs324.worker.WorkerNode @nodeArgs
     }
     "client" {
         $hostArg = if ($args.Count -ge 2) { $args[1] } else { "localhost" }
@@ -53,6 +63,6 @@ switch ($command) {
         & java -cp (Get-Classpath) com.cs324.client.ClientApp $hostArg $portArg $callbackArg
     }
     default {
-        Write-Host "Usage: .\run.ps1 build | bootstrap [port] | worker [host] [port] | client [host] [port] [callbackPort]"
+        Write-Host "Usage: .\run.ps1 build | bootstrap [rmiPort] [grpcPort] | worker [host] [port] [grpc|grpcPort] | client [host] [port] [callbackPort]"
     }
 }

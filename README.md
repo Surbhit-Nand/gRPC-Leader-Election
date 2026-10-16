@@ -37,7 +37,8 @@ The project uses gRPC runtime dependencies. The build command above copies them 
 
 **All nodes run on the same machine** (`localhost`), one terminal each.
 
-Bootstrap Node (start first, one only):
+Bootstrap Node (start first, one only). The optional second argument is the
+gRPC registry port (default `50051`); RMI keeps the first:
 
 ```
 java -cp "target/classes;target/dependency/*" com.cs324.bootstrap.BootstrapNode 1099
@@ -50,6 +51,10 @@ worker id and the worker picks the first free RMI port from 3500 upward:
 java -cp "target/classes;target/dependency/*" com.cs324.worker.WorkerNode localhost 1099
 java -cp "target/classes;target/dependency/*" com.cs324.worker.WorkerNode localhost 1099
 ```
+
+Prefix `--grpc` (optionally `--grpc-port N`, default `50051`) to register over
+the gRPC `RegistryService` instead of RMI — same ids, same peer handoff.
+Neighbour links, heartbeats and jobs still use RMI until their owners migrate.
 
 Each run prints the assigned id, e.g. `Worker 1 bound as Worker1 on port 3500 (auto-assigned)`.
 Ids are never reused within one Bootstrap run (a middle id left by a departed worker stays

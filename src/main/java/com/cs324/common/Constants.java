@@ -6,6 +6,9 @@ public class Constants {
     // Default RMI registry port; every node in one demo must agree on it.
     public static final int DEFAULT_RMI_PORT = 1099;
 
+    // Default Bootstrap gRPC port (RegistryService); RMI keeps its own port above.
+    public static final int DEFAULT_GRPC_PORT = 50051;
+
     // A coordinator serves 5 client jobs per term; JAC still increments per assignment.
     public static final int JOBS_PER_TERM = 5;
 
