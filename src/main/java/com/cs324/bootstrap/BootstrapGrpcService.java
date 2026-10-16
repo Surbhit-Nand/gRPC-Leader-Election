@@ -36,10 +36,22 @@ public class BootstrapGrpcService extends RegistryServiceGrpc.RegistryServiceImp
     public void register(RegisterRequest request,
             StreamObserver<RegisterResponse> responseObserver) {
         try {
+            if (request.getGrpcPort() < 0 || request.getGrpcPort() > 65535) {
+                throw new IllegalArgumentException("Invalid gRPC port");
+            }
+            if (request.getUpdateEndpoint()) {
+                if (request.getAutoAssign()) throw new IllegalArgumentException("Endpoint update requires a worker ID");
+                directory.publishGrpcEndpoint(request.getWorkerId(), request.getHost(), request.getPort(), request.getGrpcPort());
+                responseObserver.onNext(RegisterResponse.newBuilder().setWorkerId(request.getWorkerId()).build());
+                responseObserver.onCompleted();
+                return;
+            }
             RegistrationRecord record = request.getAutoAssign()
                     ? directory.registerAutoRecord(request.getHost(), request.getPort())
                     : directory.registerRecord(
                             request.getWorkerId(), request.getHost(), request.getPort());
+            if (request.getGrpcPort() > 0)
+                directory.publishGrpcEndpoint(record.workerId(), request.getHost(), request.getPort(), request.getGrpcPort());
             RegisterResponse.Builder reply = RegisterResponse.newBuilder()
                     .setWorkerId(record.workerId())
                     .setHasPeer(record.peerId() != null);
@@ -47,10 +59,13 @@ public class BootstrapGrpcService extends RegistryServiceGrpc.RegistryServiceImp
                 reply.setPeer(WorkerEndpoint.newBuilder()
                         .setWorkerId(record.peerId())
                         .setHost(record.peerAddress().getRmiHost())
-                        .setPort(record.peerAddress().getRmiPort()));
+                        .setPort(record.peerAddress().getRmiPort())
+                        .setGrpcPort(record.peerAddress().getGrpcPort()));
             }
             responseObserver.onNext(reply.build());
             responseObserver.onCompleted();
+        } catch (IllegalArgumentException e) {
+            responseObserver.onError(Status.INVALID_ARGUMENT.withDescription(e.getMessage()).asRuntimeException());
         } catch (DuplicateWorkerIdException e) {
             responseObserver.onError(Status.ALREADY_EXISTS
                     .withDescription(e.getMessage()).asRuntimeException());
@@ -112,7 +127,7 @@ public class BootstrapGrpcService extends RegistryServiceGrpc.RegistryServiceImp
                 reply.setWorker(WorkerEndpoint.newBuilder()
                         .setWorkerId(request.getWorkerId())
                         .setHost(address.getRmiHost())
-                        .setPort(address.getRmiPort()));
+                        .setPort(address.getRmiPort()).setGrpcPort(address.getGrpcPort()));
             }
             responseObserver.onNext(reply.build());
             responseObserver.onCompleted();

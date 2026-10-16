@@ -1,135 +1,95 @@
-# Member 3: job distribution
+# Job distribution integration
 
-Branch: `job-distribution`, based on `progress-bar` at `8d1a510`.
+The `job-distribution` branch now uses the shared `job.proto`, `registry.proto`
+and `progress.proto` contracts from main. The temporary `computation.proto`
+contract and standalone manual-address demo have been retired.
 
-This feature implements the computation services for Assignment 2. It is not a
-complete migration of the application: the existing GUI, bootstrap discovery,
-election and legacy submission path still use RMI. Those paths remain available
-while the group integrates its features. The new computation services use only
-Protocol Buffer messages and gRPC for remote task dispatch and results.
+## What is connected
 
-## Implemented
+- Workers publish their job/progress gRPC listener through RegistryService.
+- RegistryService allocates cluster-wide integer job IDs for clients.
+- The GUI submits jobs using JobService.SubmitJob.
+- The coordinator takes a fresh registry snapshot, splits input into balanced
+  non-empty slices, and includes itself in computation.
+- Remote slices use AssignTask; answers return through ReportTaskResult to the
+  original coordinator, even if leadership changes during the job.
+- ClientService.DeliverResult supplies the aggregated answer to the GUI.
+- WatchJob streams actual completed units with the existing worker breakdown.
+- MAX and PRIMECOUNT retain int32 results; PRIMESUM retains int64 results.
+- The existing leadership and five-job term budget gate submissions; each remote
+  assignment increments JAC. Concurrent clients use separate callback ports.
+- Identical duplicate submissions are acknowledged without redispatch; conflicting
+  reuse of a job ID is rejected. Duplicate results do not increase progress twice.
 
-- `computation.proto` defines `JobService.SubmitJob` (server streaming) and
-  `TaskService.ExecuteTask` (unary).
-- `GrpcJobService` snapshots membership for each new job, splits work evenly,
-  includes the coordinator in computation, dispatches peers concurrently through
-  asynchronous gRPC stubs, and combines numeric results.
-- `GrpcTaskService` computes slices on a supplied Java executor. The standalone
-  `DistributionNode` hosts it without changing the existing RMI `WorkerNode`.
-- MAX and PRIMECOUNT accept integer lists; PRIMESUM accepts an inclusive integer
-  range. Empty MAX and reversed ranges are rejected. Empty PRIMECOUNT is zero.
-- UUID job IDs separate clients. Task IDs are stable within a job (`job-id/index`).
-  Responses must match the requested job, task and worker IDs.
-- Each streamed snapshot includes worker IDs, task IDs and completed/total units.
-  Units advance only when a slice finishes; there is no artificial timer.
-  A successful final snapshot contains `finished=true` and a present `result`.
-- A fresh discovery snapshot lets workers joining during one job participate in
-  subsequent jobs; an already partitioned job retains its original participants.
+## Endpoint publication
 
-## Run independently of Member 1
+All original service/method names and field numbers remain unchanged. Additive
+registry fields distinguish the two ports during the migration:
 
-This branch owns computation only. No bootstrap implementation, discovery RPC,
-election algorithm or GUI changes are needed to run the following demo. The
-computation-specific protobuf file is a local contract for your feature; adapt
-or consolidate it with Member 1's shared contract during integration.
+- WorkerEndpoint.grpc_port (field 4): job/progress gRPC listener; zero until ready.
+- RegisterRequest.grpc_port (field 5): optional gRPC listener metadata.
+- RegisterRequest.update_endpoint (field 6): publish after the auto-assigned worker
+  ID is known. The ID, host and RMI contact port must match the registered entry.
 
-Build from the project root:
+WorkerEndpoint.port still identifies the RMI contact used by the existing peer
+network. Job RPCs use grpc_port exclusively. This avoids guessing a port or sending
+HTTP/2 traffic to an RMI registry. A directory snapshot excludes workers that have
+not yet published a ready job listener. New workers participate in subsequent jobs.
 
-```powershell
-mvn compile dependency:copy-dependencies "-DincludeScope=runtime"
-```
+## Run
 
-Start each node in a separate terminal, workers first:
-
-```powershell
-java -cp "target/classes;target/dependency/*" com.cs324.computation.demo.DistributionNode worker 2 51002
-java -cp "target/classes;target/dependency/*" com.cs324.computation.demo.DistributionNode worker 3 51003
-java -cp "target/classes;target/dependency/*" com.cs324.computation.demo.DistributionNode coordinator 1 51001 2@localhost:51002 3@localhost:51003
-```
-
-In another terminal, submit jobs:
+Rebuild and restart bootstrap, workers and clients together; old running JVMs do
+not gain new services when sources are compiled. Use one terminal per process:
 
 ```powershell
-java -cp "target/classes;target/dependency/*" com.cs324.computation.demo.DistributionClient localhost 51001 MAX 12 4 99 -3 8 17
-java -cp "target/classes;target/dependency/*" com.cs324.computation.demo.DistributionClient localhost 51001 PRIMESUM 1 100
-java -cp "target/classes;target/dependency/*" com.cs324.computation.demo.DistributionClient localhost 51001 PRIMECOUNT 2 3 4 5 8 11
+.\run.ps1 build
+.\run.ps1 bootstrap
+.\run.ps1 worker localhost 1099 grpc
+.\run.ps1 worker localhost 1099 grpc
+.\run.ps1 worker localhost 1099 grpc
+.\run.ps1 client localhost 1099 1199
 ```
 
-Expected results: `99`, `1060`, `4`. Each client prints overall completion and
-worker-level completed units. Run clients in different terminals to submit
-concurrently. Stop each node with Ctrl+C when finished.
+Wait for each worker's `gRPC jobs and progress on port ...` startup line before
+starting the next worker. The existing bootstrap peer-selection path can prune a
+worker that registered but has not bound its RMI contact during simultaneous startup.
 
-The demo uses a fixed coordinator and fixed addresses to test your component.
-It does not implement discovery, automatic joins, elections or five-job term
-rotation. The service's membership supplier is the integration point for the
-live directory later. The existing GUI remains separate from this console demo.
-
-## Integration contracts
-
-**Member 1:** review `src/main/proto/computation.proto` alongside your shared
-protobuf foundation. The Maven protobuf generator already compiles it. Publish
-each worker's computation gRPC host and port through the new bootstrap service.
-Do not send its RMI registry port to `GrpcJobService.Endpoint`.
-
-**Member 2:** attach `GrpcJobService` to the worker's gRPC server alongside
-`GrpcTaskService`. Its constructor accepts:
-
-```java
-new GrpcJobService(
-    workerId,
-    () -> discoverySnapshot,       // List<Endpoint>, refreshed on each call
-    () -> coordinatorAcceptsJobs,  // leadership/term admission hook
-    targetId -> incrementJac(),    // one increment per remote assignment
-    computationExecutor,
-    Duration.ofMinutes(10));       // configurable per-task deadline
-```
-
-The coordinator always includes itself locally. The supplied peer list may include
-it; that entry is ignored. Other worker IDs must be unique. The executor should
-have multiple threads. The host owns and shuts down the executor and gRPC server.
-The service owns and closes its outbound channels.
-
-The leadership admission hook must implement the existing term-budget policy
-(atomic reservation and handover gating). This component does not elect leaders,
-count five-job terms or replicate coordinator state. Existing accepted jobs remain
-attached to their original coordinator service when leadership changes normally.
-Coordinator crash recovery belongs to Member 2.
-
-**Member 4:** call `JobServiceGrpc.newStub(channel).submitJob(request, observer)`
-with a fresh UUID per job. Use `JobUpdate.tasks` for the worker breakdown. Overall
-progress is `100 * sum(completed_units) / sum(total_units)`; for an empty job show
-0 until `finished`, then 100. Snapshots advance at slice completion, not per number.
-Use the final optional result rather than a separate Java callback. Surface gRPC
-errors through `onError`, and update Swing controls on the EDT.
-
-The legacy GUI is not yet connected to this service. The existing
-`JobProgressService.WatchJob` stream and its integer job IDs are separate from
-this UUID-based submission stream; do not assume those APIs share state.
-
-## Recovery branch boundary
-
-Create `worker-failure-recovery` from the completed job-distribution changes (or
-from main after they merge), so it inherits this contract. That branch will add
-task attempt tracking, retry/reassignment, stale-result rejection and recovery
-tests. This branch currently terminates a job stream on task RPC failure or
-deadline expiry; it does not claim worker failure tolerance.
-
-Only concurrent duplicate job IDs are rejected. Completed jobs are not retained
-for replay, and task execution is not yet deduplicated. Do not automatically retry
-submissions with this version. Cancellation closes outbound channels, but an
-already running calculation may finish on the worker. Deadline choice must allow
-the largest supported range; it is not a heartbeat-based failure detector.
-
-## Validation
+The client arguments are `host bootstrapRmiPort callbackGrpcPort bootstrapGrpcPort`;
+the last defaults to 50051. A second client can use callback port 1200. For custom
+bootstrap ports, pass the gRPC port to both the worker and client:
 
 ```powershell
-mvn "-Dtest=GrpcJobDistributionTest,WorkerTaskDistributorTest,WorkerTaskCalculatorTest" test
+.\run.ps1 bootstrap 21099 51051
+.\run.ps1 worker localhost 21099 51051
+.\run.ps1 client localhost 21099 21199 51051
 ```
 
-The 22 tests cover real TCP gRPC serialization and streaming, all three operations,
-long prime sums, negative maxima, empty inputs, membership changes, concurrent
-clients, admission rejection, incorrect task identities, local-only operation and
-transport failure, plus existing split/calculation tests. Automated tests use
-multiple network servers in one JVM; the console demo supports separate processes.
-Bootstrap/election/GUI acceptance testing remains necessary after group integration.
+Example jobs: MAX `12,4,99,-3,8,17` returns 99; PRIMESUM `1,1000000` returns
+37550402023; PRIMECOUNT `2,3,4,5,8,11` returns 4. View opens each job's worker
+progress breakdown. The GUI retains its CSV controls and input validation.
+
+## Remaining work
+
+Election, heartbeat probes, peer links and cluster-monitor queries still use the
+existing RMI implementation. The registry also uses that contact for peer selection.
+The legacy RMI job API remains for compatibility tests, but the updated GUI's job
+submission, task dispatch, result reporting and callback path use gRPC exclusively.
+This is the computation integration, not a claim that the entire A2 migration is done.
+
+Worker reassignment/recovery belongs to `worker-failure-recovery`. This branch
+reports assignment failures and times out unfinished jobs after ten minutes; it
+does not retry or reassign slices. A timeout is a bounded error path, not a failure
+detector. Running slices may finish after a job fails. Callback failure is logged;
+there is no durable result replay or coordinator crash recovery yet. Deduplication
+state is in memory and retained until the worker process exits.
+
+## Verification
+
+```powershell
+mvn test
+```
+
+GrpcJobDistributionTest combines the real shared registry, job services, client
+callback and progress stream over TCP. It covers all operations, long sums,
+concurrency, duplicate IDs, endpoint publication, joins, invalid inputs and
+unreachable workers. Existing bootstrap and frozen-contract tests remain applicable.

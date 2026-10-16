@@ -34,11 +34,37 @@ import java.util.concurrent.atomic.AtomicLong;
 public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemote {
     private final com.cs324.progress.ProgressService progress = new com.cs324.progress.ProgressService();
     private io.grpc.Server progressServer;
+    private com.cs324.computation.RegistryClient grpcDirectory;
+    private com.cs324.computation.GrpcJobService grpcJobs;
+    private String grpcHost = "localhost";
 
+    // Share one listener for computation and progress, preserving term limits and JAC accounting.
     public synchronized void startProgressServer() throws java.io.IOException {
         if (progressServer == null) {
-            progressServer = io.grpc.ServerBuilder.forPort(0).addService(progress).build().start();
+            grpcJobs = new com.cs324.computation.GrpcJobService(id,
+                    () -> com.cs324.job.proto.CoordinatorEndpoint.newBuilder().setWorkerId(id)
+                            .setHost(grpcHost).setPort(getProgressPort()).build(),
+                    () -> {
+                        if (grpcDirectory == null) throw new IllegalStateException("gRPC discovery is not configured");
+                        return grpcDirectory.workers();
+                    }, jobId -> {
+                        if (currentCoordinatorId != id || handoverInProgress.get()) return false;
+                        try { reserveTermSlot(jobId); return true; }
+                        catch (RemoteException e) { return false; }
+                    }, workerId -> {
+                        jobAllocationCounter.incrementAndGet();
+                        recordEvent(WorkerEvent.TASK_DISPATCHED, "gRPC slice -> Worker " + workerId);
+                    }, this::maybeRotateCoordinator, executor, progress, java.time.Duration.ofMinutes(10));
+            progressServer = io.grpc.ServerBuilder.forPort(0).addService(progress).addService(grpcJobs).build().start();
         }
+    }
+
+    // Publish the actual bound port after registration so discovery can distinguish gRPC from RMI.
+    public void enableGrpcJobs(String bootstrapHost, int bootstrapGrpcPort, String host, int rmiPort) {
+        grpcHost = host;
+        grpcDirectory = new com.cs324.computation.RegistryClient(bootstrapHost, bootstrapGrpcPort);
+        grpcDirectory.publish(id, host, rmiPort, getProgressPort());
+        System.out.println("Worker " + id + " gRPC jobs and progress on port " + getProgressPort());
     }
 
     @Override
@@ -953,6 +979,8 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
 
     // Stops both pools; daemon threads mean a missed call cannot block JVM exit.
     public void shutdown() {
+        if (grpcJobs != null) grpcJobs.close();
+        if (grpcDirectory != null) grpcDirectory.close();
         if (progressServer != null) progressServer.shutdownNow();
         executor.shutdown();
         heartbeatExecutor.shutdown();

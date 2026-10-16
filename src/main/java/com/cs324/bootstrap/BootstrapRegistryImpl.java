@@ -164,4 +164,15 @@ public class BootstrapRegistryImpl extends UnicastRemoteObject implements Bootst
         // Null when unknown, which is how callers detect a stale peer.
         return activeWorkers.get(workerId);
     }
+
+    // Atomically attach the ready gRPC listener to an existing, matching registration.
+    void publishGrpcEndpoint(int workerId, String host, int port, int grpcPort) {
+        if (grpcPort < 1 || grpcPort > 65535) throw new IllegalArgumentException("Invalid gRPC port");
+        activeWorkers.compute(workerId, (id, address) -> {
+            if (address == null) throw new IllegalArgumentException("Worker is not registered");
+            if (!address.getRmiHost().equals(host) || address.getRmiPort() != port)
+                throw new IllegalArgumentException("Endpoint does not match registered worker");
+            return new WorkerAddress(host, port, grpcPort);
+        });
+    }
 }

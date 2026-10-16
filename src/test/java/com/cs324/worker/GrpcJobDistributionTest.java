@@ -1,155 +1,151 @@
 package com.cs324.worker;
 
-import com.cs324.computation.GrpcJobService;
-import com.cs324.computation.GrpcTaskService;
-import com.cs324.computation.proto.*;
+import com.cs324.bootstrap.BootstrapRegistryImpl;
+import com.cs324.bootstrap.BootstrapGrpcService;
+import com.cs324.computation.*;
+import com.cs324.job.proto.*;
+import com.cs324.registry.proto.*;
+import com.cs324.progress.ProgressService;
+import com.cs324.progress.proto.*;
 import io.grpc.*;
-import org.junit.jupiter.api.*;
+import java.rmi.server.UnicastRemoteObject;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.*;
+import org.junit.jupiter.api.*;
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Real TCP gRPC calls exercise serialization, concurrent dispatch and streaming. */
+/** Registry discovery, shared job callbacks and progress use real TCP gRPC calls. */
 class GrpcJobDistributionTest {
-    private final ExecutorService computation = Executors.newFixedThreadPool(4);
+    private final ExecutorService pool = Executors.newFixedThreadPool(8);
     private final List<Server> servers = new ArrayList<>();
-    private final List<GrpcJobService.Endpoint> members = new CopyOnWriteArrayList<>();
-    private final AtomicBoolean leader = new AtomicBoolean(true);
+    private final List<GrpcJobService> services = new ArrayList<>();
+    private final List<java.rmi.registry.Registry> contacts = new ArrayList<>();
+    private final List<WorkerRemoteImpl> controlWorkers = new ArrayList<>();
+    private final Map<Integer, CompletableFuture<Object>> results = new ConcurrentHashMap<>();
     private final AtomicInteger assignments = new AtomicInteger();
-    private ManagedChannel channel;
-    private JobServiceGrpc.JobServiceBlockingStub client;
+    private final AtomicBoolean leader = new AtomicBoolean(true);
+    private BootstrapRegistryImpl directory;
+    private RegistryClient discovery;
+    private ManagedChannel registryChannel, coordinatorChannel;
+    private int clientPort;
+    private RegistryServiceGrpc.RegistryServiceBlockingStub registry;
+    private com.cs324.job.proto.JobServiceGrpc.JobServiceBlockingStub client;
 
     @BeforeEach void setup() throws Exception {
-        addWorker(2);
-        addWorker(3);
-        Server coordinator = ServerBuilder.forPort(0).addService(new GrpcJobService(1,
-                () -> List.copyOf(members), leader::get, id -> assignments.incrementAndGet(),
-                computation, Duration.ofSeconds(5))).build().start();
-        servers.add(coordinator);
-        channel = ManagedChannelBuilder.forAddress("localhost", coordinator.getPort()).usePlaintext().build();
-        client = JobServiceGrpc.newBlockingStub(channel).withDeadlineAfter(10, TimeUnit.SECONDS);
+        directory = new BootstrapRegistryImpl();
+        Server bootstrap = ServerBuilder.forPort(0).addService(new BootstrapGrpcService(directory)).build().start();
+        servers.add(bootstrap);
+        discovery = new RegistryClient("localhost", bootstrap.getPort());
+        registryChannel = ManagedChannelBuilder.forAddress("localhost", bootstrap.getPort()).usePlaintext().build();
+        registry = RegistryServiceGrpc.newBlockingStub(registryChannel).withDeadlineAfter(5, TimeUnit.SECONDS);
+        Server callbacks = ServerBuilder.forPort(0).addService(new ClientResultService((id, value) ->
+                results.computeIfAbsent(id, ignored -> new CompletableFuture<>()).complete(value))).build().start();
+        servers.add(callbacks); clientPort = callbacks.getPort();
+        int port = addWorker(1); addWorker(2); addWorker(3);
+        coordinatorChannel = ManagedChannelBuilder.forAddress("localhost", port).usePlaintext().build();
+        client = com.cs324.job.proto.JobServiceGrpc.newBlockingStub(coordinatorChannel).withDeadlineAfter(5, TimeUnit.SECONDS);
     }
-
-    private void addWorker(int id) throws Exception {
-        Server server = ServerBuilder.forPort(0).addService(new GrpcTaskService(id, computation)).build().start();
-        servers.add(server);
-        members.add(new GrpcJobService.Endpoint(id, "localhost", server.getPort()));
+    private int addWorker(int id) throws Exception {
+        // Member 1 still probes the RMI contact during peer selection.
+        int contactPort;
+        try (java.net.ServerSocket reservation = new java.net.ServerSocket(0)) { contactPort = reservation.getLocalPort(); }
+        java.rmi.registry.Registry contact = java.rmi.registry.LocateRegistry.createRegistry(contactPort);
+        WorkerRemoteImpl controlWorker = new WorkerRemoteImpl(id);
+        contact.rebind("Worker" + id, controlWorker);
+        contacts.add(contact); controlWorkers.add(controlWorker);
+        AtomicInteger port = new AtomicInteger();
+        ProgressService progress = new ProgressService();
+        GrpcJobService service = new GrpcJobService(id,
+                () -> CoordinatorEndpoint.newBuilder().setWorkerId(id).setHost("localhost").setPort(port.get()).build(),
+                discovery::workers, jobId -> id == 1 && leader.get(), peer -> assignments.incrementAndGet(),
+                () -> {}, pool, progress, Duration.ofSeconds(5));
+        Server server = ServerBuilder.forPort(0).addService(service).addService(progress).build().start();
+        services.add(service); servers.add(server); port.set(server.getPort());
+        registry.register(RegisterRequest.newBuilder().setWorkerId(id).setHost("localhost").setPort(contactPort).build());
+        discovery.publish(id, "localhost", contactPort, server.getPort());
+        return server.getPort();
     }
-
     @AfterEach void cleanup() throws Exception {
-        if (channel != null) channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        if (coordinatorChannel != null) coordinatorChannel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        if (registryChannel != null) registryChannel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        if (discovery != null) discovery.close();
+        services.forEach(GrpcJobService::close);
         for (Server server : servers) server.shutdownNow();
         for (Server server : servers) assertTrue(server.awaitTermination(5, TimeUnit.SECONDS));
-        computation.shutdownNow();
-        assertTrue(computation.awaitTermination(5, TimeUnit.SECONDS));
+        for (WorkerRemoteImpl worker : controlWorkers) { worker.shutdown(); UnicastRemoteObject.unexportObject(worker, true); }
+        for (java.rmi.registry.Registry contact : contacts) UnicastRemoteObject.unexportObject(contact, true);
+        if (directory != null) UnicastRemoteObject.unexportObject(directory, true);
+        pool.shutdownNow(); assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS));
     }
-
-    private JobRequest numbers(JobType type, int... values) {
-        Numbers.Builder input = Numbers.newBuilder();
-        for (int value : values) input.addValues(value);
-        return JobRequest.newBuilder().setJobId(UUID.randomUUID().toString()).setType(type)
-                .setInput(WorkInput.newBuilder().setNumbers(input)).build();
+    private SubmitJobRequest request(String type, Object payload) {
+        return SubmitJobRequest.newBuilder().setJobId(discovery.allocateJobId()).setJobType(type)
+                .setPayload(ComputationCodec.encode(payload)).setClient(ClientEndpoint.newBuilder()
+                        .setHost("localhost").setPort(clientPort).setName("Client")).build();
     }
-
-    private List<JobUpdate> run(JobRequest request) {
-        List<JobUpdate> updates = new ArrayList<>();
-        client.submitJob(request).forEachRemaining(updates::add);
-        assertTrue(updates.getLast().getFinished());
-        assertTrue(updates.getLast().hasResult());
-        return updates;
+    private Object run(SubmitJobRequest request) throws Exception {
+        CompletableFuture<Object> result = results.computeIfAbsent(request.getJobId(), ignored -> new CompletableFuture<>());
+        client.submitJob(request); return result.get(10, TimeUnit.SECONDS);
     }
-
-    @Test void maxSplitsAcrossAllWorkersAndStreamsRealCompletion() {
-        List<JobUpdate> updates = run(numbers(JobType.MAX, -9, -2, -5, -7, -4, -8));
-        assertEquals(-2, updates.getLast().getResult());
-        assertEquals(2, assignments.get());
-        assertEquals(List.of(1, 2, 3), updates.getFirst().getTasksList().stream()
-                .map(TaskProgress::getWorkerId).toList());
-        long previous = 0;
-        for (JobUpdate update : updates) {
-            long completed = update.getTasksList().stream().mapToLong(TaskProgress::getCompletedUnits).sum();
-            assertTrue(completed >= previous);
-            previous = completed;
-            for (TaskProgress task : update.getTasksList())
-                assertEquals(task.getCompleted() ? task.getTotalUnits() : 0, task.getCompletedUnits());
-            assertEquals(update.getFinished(), update.hasResult());
-        }
-        assertEquals(6, previous);
+    private JobProgress progress(int id) {
+        var replay = JobProgressServiceGrpc.newBlockingStub(coordinatorChannel).withDeadlineAfter(5, TimeUnit.SECONDS)
+                .watchJob(WatchJobRequest.newBuilder().setJobId(id).build());
+        JobProgress last = null;
+        while (replay.hasNext()) last = replay.next();
+        return last;
     }
-
-    @Test void primeSumUsesInclusiveRangesAndLongResults() {
-        JobRequest request = JobRequest.newBuilder().setJobId(UUID.randomUUID().toString()).setType(JobType.PRIMESUM)
-                .setInput(WorkInput.newBuilder().setRange(PrimeRange.newBuilder().setStart(2).setEnd(1_000_000))).build();
-        assertEquals(37_550_402_023L, run(request).getLast().getResult());
+    @Test void maxUsesPublishedGrpcPortsAndStreamsActualWork() throws Exception {
+        SubmitJobRequest request = request("MAX", new int[]{-9,-2,-5,-7,-4,-8});
+        assertEquals(-2, run(request)); assertEquals(2, assignments.get());
+        JobProgress last = progress(request.getJobId());
+        assertTrue(last.getFinished()); assertEquals(3, last.getWorkersCount());
+        assertEquals(6, last.getWorkersList().stream().mapToLong(WorkerProgress::getCompletedUnits).sum());
+        assertTrue(discovery.workers().stream().allMatch(w -> w.getGrpcPort() > 0 && w.getGrpcPort() != w.getPort()));
     }
-
-    @Test void primeCountKeepsDuplicatesAndSupportsEmptyInput() {
-        assertEquals(4, run(numbers(JobType.PRIMECOUNT, -1, 0, 1, 2, 2, 3, 4, 5)).getLast().getResult());
-        List<JobUpdate> empty = run(numbers(JobType.PRIMECOUNT));
-        assertEquals(0, empty.getLast().getResult());
-        assertEquals(1, empty.getLast().getTasksCount());
+    @Test void primeSumRetains64BitResult() throws Exception {
+        assertEquals(37_550_402_023L, run(request("PRIMESUM", new WorkerTaskCalculator.PrimeRange(1,1_000_000))));
     }
-
-    @Test void doesNotDispatchEmptySlicesAndRefreshesMembership() throws Exception {
-        assertEquals(1, run(numbers(JobType.MAX, 7)).getFirst().getTasksCount());
-        assertEquals(0, assignments.get());
+    @Test void primeCountKeepsDuplicatesAndSupportsEmptyInput() throws Exception {
+        assertEquals(4, run(request("PRIMECOUNT", new int[]{-1,0,1,2,2,3,4,5})));
+        SubmitJobRequest empty = request("PRIMECOUNT", new int[0]);
+        assertEquals(0, run(empty)); assertEquals(1, progress(empty.getJobId()).getWorkersCount());
+    }
+    @Test void joiningWorkersEnterTheNextJobAndSmallJobsStayLocal() throws Exception {
+        assertEquals(7, run(request("MAX", new int[]{7}))); assertEquals(0, assignments.get());
         addWorker(4);
-        assertEquals(4, run(numbers(JobType.MAX, 1, 2, 3, 4)).getFirst().getTasksCount());
-        assertEquals(3, assignments.get());
+        SubmitJobRequest next = request("MAX", new int[]{1,2,3,4});
+        assertEquals(4, run(next)); assertEquals(4, progress(next.getJobId()).getWorkersCount());
     }
-
     @Test void rejectsInvalidInputAndNonCoordinator() {
-        StatusRuntimeException invalid = assertThrows(StatusRuntimeException.class, () -> run(numbers(JobType.MAX)));
-        assertEquals(Status.Code.INVALID_ARGUMENT, invalid.getStatus().getCode());
-        invalid = assertThrows(StatusRuntimeException.class, () -> run(numbers(JobType.PRIMESUM, 2, 3)));
-        assertEquals(Status.Code.INVALID_ARGUMENT, invalid.getStatus().getCode());
+        StatusRuntimeException error = assertThrows(StatusRuntimeException.class, () -> run(request("MAX", new int[0])));
+        assertEquals(Status.Code.INVALID_ARGUMENT, error.getStatus().getCode());
         leader.set(false);
-        StatusRuntimeException rejected = assertThrows(StatusRuntimeException.class, () -> run(numbers(JobType.MAX, 1)));
-        assertEquals(Status.Code.FAILED_PRECONDITION, rejected.getStatus().getCode());
+        error = assertThrows(StatusRuntimeException.class, () -> run(request("MAX", new int[]{1})));
+        assertEquals(Status.Code.FAILED_PRECONDITION, error.getStatus().getCode());
     }
-
-    @Test void concurrentClientsReceiveTheirOwnResults() throws Exception {
+    @Test void concurrentJobsAndDuplicateSubmissionsStaySeparate() throws Exception {
+        SubmitJobRequest first = request("MAX", new int[]{9,100,-3});
+        SubmitJobRequest second = request("PRIMECOUNT", new int[]{2,3,4});
         try (ExecutorService clients = Executors.newFixedThreadPool(2)) {
-            Future<Long> first = clients.submit(() -> run(numbers(JobType.MAX, 9, 100, -3)).getLast().getResult());
-            Future<Long> second = clients.submit(() -> run(numbers(JobType.PRIMECOUNT, 2, 3, 4)).getLast().getResult());
-            assertEquals(100L, first.get(10, TimeUnit.SECONDS));
-            assertEquals(2L, second.get(10, TimeUnit.SECONDS));
+            Future<Object> a = clients.submit(() -> run(first)); Future<Object> b = clients.submit(() -> run(second));
+            assertEquals(100, a.get(10, TimeUnit.SECONDS)); assertEquals(2, b.get(10, TimeUnit.SECONDS));
         }
-    }
-
-    @Test void workerTransportFailureTerminatesStream() throws Exception {
-        servers.getFirst().shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        int count = assignments.get(); client.submitJob(first); assertEquals(count, assignments.get());
         StatusRuntimeException error = assertThrows(StatusRuntimeException.class,
-                () -> run(numbers(JobType.MAX, 1, 2, 3)));
-        assertEquals(Status.Code.UNAVAILABLE, error.getStatus().getCode());
+                () -> client.submitJob(first.toBuilder().setPayload(ComputationCodec.encode(new int[]{5})).build()));
+        assertEquals(Status.Code.ALREADY_EXISTS, error.getStatus().getCode());
     }
-
-    @Test void coordinatorCanProcessJobsWithoutOtherWorkers() {
-        members.clear();
-        JobUpdate result = run(numbers(JobType.MAX, 8, 2, 10)).getLast();
-        assertEquals(10, result.getResult());
-        assertEquals(1, result.getTasksCount());
-        assertEquals(1, result.getTasks(0).getWorkerId());
-        assertEquals(0, assignments.get());
+    @Test void stoppedWorkerReturnsAnExplicitJobError() throws Exception {
+        servers.get(3).shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        Object result = run(request("MAX", new int[]{1,2,3}));
+        assertInstanceOf(String.class, result); assertTrue(result.toString().contains("assignment failed"));
     }
-
-    @Test void rejectsResultFromTheWrongTask() throws Exception {
-        Server wrongWorker = ServerBuilder.forPort(0).addService(new TaskServiceGrpc.TaskServiceImplBase() {
-            @Override public void executeTask(TaskRequest request,
-                    io.grpc.stub.StreamObserver<TaskResult> response) {
-                response.onNext(TaskResult.newBuilder().setJobId(request.getJobId())
-                        .setTaskId("another-task").setWorkerId(2).setValue(999).build());
-                response.onCompleted();
-            }
-        }).build().start();
-        servers.add(wrongWorker);
-        members.clear();
-        members.add(new GrpcJobService.Endpoint(2, "localhost", wrongWorker.getPort()));
+    @Test void endpointPublicationRequiresRegisteredIdentity() {
+        var address = discovery.worker(1);
         StatusRuntimeException error = assertThrows(StatusRuntimeException.class,
-                () -> run(numbers(JobType.MAX, 1, 2)));
-        assertEquals(Status.Code.DATA_LOSS, error.getStatus().getCode());
+                () -> discovery.publish(1, "wrong-host", address.getPort(), address.getGrpcPort()));
+        assertEquals(Status.Code.INVALID_ARGUMENT, error.getStatus().getCode());
+        assertEquals(address, discovery.worker(1));
     }
 }

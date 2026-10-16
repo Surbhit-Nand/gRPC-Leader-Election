@@ -1,9 +1,9 @@
 # CS324 Assignment 2 (2026) - Distributed Worker Cluster
 
 The gRPC computation feature and integration instructions are in
-[Job distribution](docs/job-distribution.md). The run instructions below still
-launch the existing application; its GUI submission, discovery and election
-paths have not yet been migrated fully from RMI.
+[Job distribution](docs/job-distribution.md). The GUI now uses the shared gRPC
+contracts for job submission, distribution, results and progress. Elections,
+peer links and cluster monitoring still use RMI.
 
 ## Prerequisites
 
@@ -68,7 +68,7 @@ java -cp "target/classes;target/dependency/*" com.cs324.worker.WorkerNode localh
 
 Prefix `--grpc` (optionally `--grpc-port N`, default `50051`) to register over
 the gRPC `RegistryService` instead of RMI — same ids, same peer handoff.
-Neighbour links, heartbeats and jobs still use RMI until their owners migrate.
+Neighbour links, elections and heartbeats still use RMI. GUI job submission, worker assignments and result callbacks now use the shared gRPC job contract.
 
 Each run prints the assigned id, e.g. `Worker 1 bound as Worker1 on port 3500 (auto-assigned)`.
 Ids are never reused within one Bootstrap run (a middle id left by a departed worker stays
@@ -83,7 +83,7 @@ java -cp "target/classes;target/dependency/*" com.cs324.client.ClientApp localho
 java -cp "target/classes;target/dependency/*" com.cs324.client.ClientApp localhost 1099 1200
 ```
 
-The arguments are `bootstrapHost bootstrapPort clientRmiPort`; all three are optional and default to `localhost 1099 1199`.
+The arguments are `bootstrapHost bootstrapRmiPort clientCallbackPort bootstrapGrpcPort`; all are optional and default to `localhost 1099 1199 50051`.
 
 > The `java` commands above and `.\run.ps1 bootstrap|worker|client` are interchangeable — the script just fills in the defaults shown here. A bare `java -cp target/classes ...` (without `target/dependency/*`) will fail with `NoClassDefFoundError: io/grpc/...` because the gRPC jars live in `target/dependency`.
 
@@ -134,7 +134,7 @@ For anything that has to keep running, fork a JVM with `exec:exec` (`%classpath`
 mvn exec:exec -Dexec.executable=java -Dexec.args="-classpath %classpath com.cs324.bootstrap.BootstrapNode 1099"
 ```
 
-**Why fork:** `exec:java` runs the program inside the Maven JVM and only tracks threads created in its own thread group. RMI (`LocateRegistry.createRegistry`, exported remote objects) creates non-daemon threads in the *system* thread group, so a node started that way can disappear as soon as the build finishes - measured on this repo: `mvn -Pbootstrap exec:java` printed `Bootstrap Node running on port 1099 as BootstrapRegistry` and then exited, while the `exec:exec` form was still listening on port 1099 after 30 seconds and released the port when Maven was stopped. The same applies to the client, which creates its own result registry, so the `java -cp "target/classes;target/dependency/*"` commands above are the ones to use for the demo.
+**Why fork:** `exec:java` runs the program inside the Maven JVM and only tracks threads created in its own thread group. RMI (`LocateRegistry.createRegistry`, exported remote objects) creates non-daemon threads in the *system* thread group, so a node started that way can disappear as soon as the build finishes - measured on this repo: `mvn -Pbootstrap exec:java` printed `Bootstrap Node running on port 1099 as BootstrapRegistry` and then exited, while the `exec:exec` form was still listening on port 1099 after 30 seconds and released the port when Maven was stopped. The same applies to the client, which opens its own gRPC result listener, so the `java -cp "target/classes;target/dependency/*"` commands above are the ones to use for the demo.
 
 ### Troubleshooting
 
@@ -152,7 +152,7 @@ mvn exec:exec -Dexec.executable=java -Dexec.args="-classpath %classpath com.cs32
 mvn test
 ```
 
-160 JUnit 5 tests cover the election protocol, duplicate-message handling, job splitting and aggregation, client callbacks, coordinator rotation, thread safety, auto-assigned worker ids, partition-healing rewire, the cluster-activity monitor, range warnings, gRPC contract shapes, Bootstrap discovery over gRPC, and job progress streaming.
+171 JUnit 5 tests cover the election protocol, duplicate-message handling, job splitting and aggregation, client callbacks, coordinator rotation, thread safety, auto-assigned worker ids, partition-healing rewire, the cluster-activity monitor, range warnings, gRPC contract shapes, Bootstrap discovery over gRPC, and job progress streaming.
 
 ---
 
@@ -186,9 +186,9 @@ See [docs/election.md](docs/election.md) for propagation, duplicate handling, wi
 - `progress.proto` — `JobProgressService.WatchJob`: live per-worker progress streams (already wired into workers and the GUI, see [Job progress](#job-progress-first-a2-migration-step)).
 - `registry.proto` — `RegistryService`: Bootstrap discovery (register with auto-assign, deregister, job-id allocation, active-worker and address lookup). Served alongside RMI by `BootstrapNode` (second arg = gRPC port, default `50051`); workers opt in with `--grpc`.
 - `election.proto` — `ElectionService` (wave, echo, coordinator announcement) for the election migration; behavior still on RMI.
-- `job.proto` — `JobService` (submit, assign, report) plus `ClientService.DeliverResult` for the client callback; payloads are `PrimeRange` messages or `repeated int32` lists. Dispatch still on RMI.
+- `job.proto` — `JobService` (submit, assign, report) plus `ClientService.DeliverResult` for the client callback; payloads are `PrimeRange` messages or `repeated int32` lists. Wired into the GUI and worker distribution path.
 
-Maven generates the Java stubs during `compile`. Migration status: progress streaming and Bootstrap discovery are dual-stack; election, jobs, and client callbacks remain RMI until their owners migrate.
+Maven generates the Java stubs during `compile`. Migration status: job submission, assignments, result callbacks, progress and job discovery use gRPC. Bootstrap remains dual-stack; elections, peer links and cluster monitoring still use RMI.
 
 ---
 
@@ -292,13 +292,13 @@ java -cp "target/classes;target/dependency/*" com.cs324.client.ClientApp localho
 
 ### Distribution integration
 
-The client obtains job IDs from `BootstrapRemote.allocateJobId()` so concurrent
+The GUI obtains job IDs from gRPC `RegistryService.AllocateJobId` so concurrent
 clients cannot accidentally reuse IDs. Bootstrap only allocates identifiers and
 provides worker addresses; it does not calculate, split or combine jobs. Manual RMI
 clients must also request their job IDs from bootstrap. IDs last for one bootstrap
 process; restart the whole cluster together when starting a fresh run.
 
-Each client process needs its own callback registry port; see the two-client
+Each client process needs its own gRPC callback port; see the two-client
 commands in [How to Run](#how-to-run-any-ide-or-terminal).
 
 With four registered workers, PRIMESUM(1,1000) splits into 1-250, 251-500,
@@ -312,8 +312,8 @@ widths up to a billion submit end-to-end: the splitter uses 64-bit arithmetic
 so chunk boundaries stay exact, and sums/counts still fit their result types.
 Only wall-clock time stands in the way (trial division to √n per number), so
 the client warns before submitting — above 1M width it discloses minutes, above
-100M hours — and proceeds on confirm. Nothing is capped: a 1B-wide range runs
-for hours across the workers rather than failing.
+100M hours — and proceeds on confirm. The input width is not capped, but the gRPC distribution path has a ten-minute job deadline; a 1B-wide range may need
+hours across the workers and exceed that deadline.
 
 `ClusterDistributionTest` uses four workers connected in a chain over RMI. It
 checks every worker's participation, the assignment's range example, waiting for
@@ -339,10 +339,4 @@ and service classes during `compile`; reload the Maven project in your IDE.
 The coordinator retains the latest 256 completed job snapshots, allowing very fast
 jobs to display progress even when they finish before the client subscribes.
 
-This is an incremental migration: job submission, results, elections,
-and worker task delivery still use RMI, while progress streaming and Bootstrap
-discovery (registration/deregistration) already speak gRPC. Progress updates are at share completion,
-not within a share. A locally recovered share keeps its originally assigned worker
-label. Interrupted progress streams are displayed explicitly and do not yet reconnect
-automatically or recover across coordinator failure. Full A2 transport migration and
-failure recovery remain to be implemented.
+Job submission, worker task delivery, results and progress now use gRPC through the shared contracts. Elections, neighbour links and cluster monitoring still use RMI. Progress updates occur at share completion. Interrupted streams do not yet reconnect automatically. Worker reassignment and coordinator state recovery remain separate work; see [distribution integration](docs/job-distribution.md) for the current failure behavior.

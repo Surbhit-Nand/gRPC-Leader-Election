@@ -38,6 +38,7 @@ public class ClientApp extends JFrame {
     private final String bootstrapHost;
     private final int bootstrapPort;
     private final int clientPort;
+    private final int bootstrapGrpcPort;
 
     // Keep controls as fields so button handlers can read input and update messages.
     private final JComboBox<String> jobTypeBox =
@@ -50,7 +51,8 @@ public class ClientApp extends JFrame {
 
     // Backend references (lazy: resolved on the first submission).
     private BootstrapRemote bootstrap;
-    private ClientRemoteImpl clientRemote;
+    private io.grpc.Server resultServer;
+    private com.cs324.computation.RegistryClient grpcDirectory;
     // Row index in the model of each in-flight job this window owns, keyed by job id.
     private final ConcurrentHashMap<Integer, Integer> rowByJobId = new ConcurrentHashMap<>();
     private final AtomicInteger nextRequestId = new AtomicInteger(1);
@@ -82,6 +84,9 @@ public class ClientApp extends JFrame {
 
     @Override public void dispose() {
         progressView.close();
+        if (clusterTimer != null) clusterTimer.stop();
+        if (resultServer != null) resultServer.shutdownNow();
+        if (grpcDirectory != null) grpcDirectory.close();
         super.dispose();
     }
     // CardLayout displays either the empty-state message or the populated table.
@@ -115,10 +120,15 @@ public class ClientApp extends JFrame {
 
     // One-pass construction: builds the three sections, then wires controls to their handlers.
     public ClientApp(String bootstrapHost, int bootstrapPort, int clientPort) {
+        this(bootstrapHost, bootstrapPort, clientPort, com.cs324.common.Constants.DEFAULT_GRPC_PORT);
+    }
+
+    public ClientApp(String bootstrapHost, int bootstrapPort, int clientPort, int bootstrapGrpcPort) {
         super("CS324 Distributed Job Client");
         this.bootstrapHost = bootstrapHost;
         this.bootstrapPort = bootstrapPort;
         this.clientPort = clientPort;
+        this.bootstrapGrpcPort = bootstrapGrpcPort;
 
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setMinimumSize(new Dimension(1000, 700));
@@ -687,13 +697,13 @@ public class ClientApp extends JFrame {
     // Lazy backend setup under the monitor, so two submissions cannot create two registries.
     // The first submission creates our result registry and looks up the Bootstrap node.
     private synchronized void connectBackend() throws Exception {
-        if (clientRemote == null) {
-            Registry clientRegistry = LocateRegistry.createRegistry(clientPort);
-            // RMI threads hand results back, so the callback hops onto the event thread.
-            clientRemote = new ClientRemoteImpl((jobId, result) ->
-                    SwingUtilities.invokeLater(() -> onResult(jobId, result)));
-            clientRegistry.rebind("Client", clientRemote);
+        if (resultServer == null) {
+            resultServer = io.grpc.ServerBuilder.forPort(clientPort)
+                    .addService(new com.cs324.computation.ClientResultService((jobId, result) ->
+                            SwingUtilities.invokeLater(() -> onResult(jobId, result))))
+                    .build().start();
         }
+        if (grpcDirectory == null) grpcDirectory = new com.cs324.computation.RegistryClient(bootstrapHost, bootstrapGrpcPort);
         if (bootstrap == null) {
             Registry bootstrapRegistry = LocateRegistry.getRegistry(bootstrapHost, bootstrapPort);
             bootstrap = (BootstrapRemote) bootstrapRegistry.lookup("BootstrapRegistry");
@@ -817,11 +827,11 @@ public class ClientApp extends JFrame {
         jobCount.setText(jobModel.getRowCount() + (jobModel.getRowCount() == 1 ? " job" : " jobs"));
         statusLabel.setText("Contacting coordinator...");
 
-        // Blocking RMI calls run here, never on the EDT, so the window stays responsive.
+        // Run discovery and blocking gRPC calls off the EDT so the window stays responsive.
         new Thread(() -> {
             try {
                 connectBackend();
-                final int jobId = bootstrap.allocateJobId();
+                final int jobId = grpcDirectory.allocateJobId();
 
                 assignedId.set(jobId);
                 SwingUtilities.invokeAndWait(() -> {
@@ -852,20 +862,22 @@ public class ClientApp extends JFrame {
 
                         coordinatorId = coordinator.getId();
 
-                        coordinator.submitJob(
-                                jobId,
-                                op,
-                                finalPayload,
-                                "localhost",
-                                clientPort,
-                                "Client"
-                        );
+                        com.cs324.registry.proto.WorkerEndpoint jobEndpoint = grpcDirectory.worker(coordinatorId);
+                        io.grpc.ManagedChannel jobChannel = io.grpc.ManagedChannelBuilder
+                                .forAddress(jobEndpoint.getHost(), jobEndpoint.getGrpcPort()).usePlaintext().build();
+                        try {
+                            com.cs324.job.proto.JobServiceGrpc.newBlockingStub(jobChannel)
+                                    .withDeadlineAfter(10, java.util.concurrent.TimeUnit.SECONDS)
+                                    .submitJob(com.cs324.job.proto.SubmitJobRequest.newBuilder().setJobId(jobId)
+                                            .setJobType(op).setPayload(com.cs324.computation.ComputationCodec.encode(finalPayload))
+                                            .setClient(com.cs324.job.proto.ClientEndpoint.newBuilder().setHost("localhost")
+                                                    .setPort(clientPort).setName("Client")).build());
+                        } finally { jobChannel.shutdown(); }
 
                         accepted = true;
                         // Progress failure must never resubmit an already accepted job.
                         try {
-                            WorkerAddress address = bootstrap.getWorkerAddress(coordinatorId);
-                            progressView.watch(address.getRmiHost(), coordinator.getProgressPort(), jobId, modelRow,
+                            progressView.watch(jobEndpoint.getHost(), jobEndpoint.getGrpcPort(), jobId, modelRow,
                                     () -> generation == historyGeneration);
                         } catch (Exception progressError) {
                             SwingUtilities.invokeLater(() -> {
@@ -874,6 +886,10 @@ public class ClientApp extends JFrame {
                         }
                         break;
 
+                    } catch (io.grpc.StatusRuntimeException e) {
+                        lastError = e;
+                        if (e.getStatus().getCode() != io.grpc.Status.Code.FAILED_PRECONDITION) break;
+                        Thread.sleep(500);
                     } catch (RemoteException e) {
                         lastError = e;
                         Thread.sleep(500);
@@ -967,12 +983,13 @@ public class ClientApp extends JFrame {
         String bootstrapHost = args.length > 0 ? args[0] : "localhost";
         int bootstrapPort = args.length > 1 ? Integer.parseInt(args[1]) : 1099;
         int clientPort = args.length > 2 ? Integer.parseInt(args[2]) : 1199;
+        int grpcPort = args.length > 3 ? Integer.parseInt(args[3]) : com.cs324.common.Constants.DEFAULT_GRPC_PORT;
         // Swing components must be built on the event thread; all RMI work runs elsewhere.
         final String host = bootstrapHost;
         final int bPort = bootstrapPort;
         final int cPort = clientPort;
         SwingUtilities.invokeLater(
-                () -> new ClientApp(host, bPort, cPort).setVisible(true)
+                () -> new ClientApp(host, bPort, cPort, grpcPort).setVisible(true)
         );
     }
 }
