@@ -31,6 +31,8 @@ message WorkerEndpoint {
   int32 worker_id = 1;
   string host = 2;
   int32 port = 3;
+  // JobService and JobProgressService port; zero until the worker is ready.
+  int32 grpc_port = 4;
 }
 
 message RegisterRequest {
@@ -41,6 +43,10 @@ message RegisterRequest {
   // True mirrors registerWorkerAuto: the server allocates the next monotonic id.
   // False mirrors registerWorker: the caller claims worker_id (hidden manual path).
   bool auto_assign = 4;
+  int32 grpc_port = 5;
+  // Publish the gRPC listener after auto-ID registration. Existing identity,
+  // host and contact port must match; this never allocates or reuses an ID.
+  bool update_endpoint = 6;
 }
 
 message RegisterResponse {

@@ -8,7 +8,7 @@
 #   .\run.ps1 bootstrap [rmiPort] [grpcPort]    # defaults 1099 50051
 #   .\run.ps1 worker [host] [port] [grpc]       # default localhost 1099 RMI; third arg "grpc"
 #                                               # or a grpc port number registers over gRPC instead
-#   .\run.ps1 client [host] [port] [callbackPort]  # default localhost 1099 1199
+#   .\run.ps1 client [host] [port] [callbackPort] [grpcPort]  # defaults localhost 1099 1199 50051
 $ErrorActionPreference = "Stop"
 
 function Get-Mvn {
@@ -60,9 +60,10 @@ switch ($command) {
         $hostArg = if ($args.Count -ge 2) { $args[1] } else { "localhost" }
         $portArg = if ($args.Count -ge 3) { $args[2] } else { "1099" }
         $callbackArg = if ($args.Count -ge 4) { $args[3] } else { "1199" }
-        & java -cp (Get-Classpath) com.cs324.client.ClientApp $hostArg $portArg $callbackArg
+        $grpcArg = if ($args.Count -ge 5) { $args[4] } else { "50051" }
+        & java -cp (Get-Classpath) com.cs324.client.ClientApp $hostArg $portArg $callbackArg $grpcArg
     }
     default {
-        Write-Host "Usage: .\run.ps1 build | bootstrap [rmiPort] [grpcPort] | worker [host] [port] [grpc|grpcPort] | client [host] [port] [callbackPort]"
+        Write-Host "Usage: .\run.ps1 build | bootstrap [rmiPort] [grpcPort] | worker [host] [port] [grpc|grpcPort] | client [host] [port] [callbackPort] [grpcPort]"
     }
 }

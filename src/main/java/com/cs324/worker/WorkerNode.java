@@ -124,6 +124,7 @@ public class WorkerNode {
             }
             // Heartbeats start last: a silent coordinator is what triggers a new election.
             self.setBootstrapReference(bootstrap[0], myHost);
+            self.enableGrpcJobs(bootstrapHost, config.bootstrapGrpcPort(), myHost, rmiPort);
         } catch (Exception e) {
             System.out.println("Failed to start Worker Node: " + e.getMessage());
             // Best effort: release a registry we reserved but never registered.
