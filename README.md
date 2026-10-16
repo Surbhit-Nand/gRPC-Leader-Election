@@ -1,5 +1,10 @@
 # CS324 Assignment 2 (2026) - Distributed Worker Cluster
 
+The gRPC computation feature and integration instructions are in
+[Job distribution](docs/job-distribution.md). The run instructions below still
+launch the existing application; its GUI submission, discovery and election
+paths have not yet been migrated fully from RMI.
+
 ## Prerequisites
 
 - **JDK 25 (or newer)** — the project targets Java 25 (latest LTS). You must have JDK 25+ installed or the build will fail with a "release version not supported" error.
