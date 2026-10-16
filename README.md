@@ -66,6 +66,11 @@ java -cp "target/classes;target/dependency/*" com.cs324.client.ClientApp localho
 
 The arguments are `bootstrapHost bootstrapPort clientRmiPort`; all three are optional and default to `localhost 1099 1199`.
 
+> Shortcut: `.\run.ps1 build` compiles and fetches the jars, then `.\run.ps1 bootstrap`,
+> `.\run.ps1 worker`, and `.\run.ps1 client` launch each node with the right classpath.
+> A bare `java -cp target/classes ...` will fail with `NoClassDefFoundError: io/grpc/...`
+> because the gRPC jars live in `target/dependency`.
+
 ### VS Code
 
 Press **F5** (Run and Debug) and pick a configuration from `.vscode/launch.json`:
