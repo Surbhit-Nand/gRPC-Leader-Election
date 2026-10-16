@@ -5,10 +5,20 @@ import com.cs324.common.Constants;
 import com.cs324.common.WorkerAddress;
 import com.cs324.common.WorkerRegistration;
 import com.cs324.common.WorkerRemote;
+import com.cs324.registry.proto.DeregisterRequest;
+import com.cs324.registry.proto.RegisterRequest;
+import com.cs324.registry.proto.RegisterResponse;
+import com.cs324.registry.proto.RegistryServiceGrpc;
+import com.cs324.registry.proto.WorkerEndpoint;
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
 
 import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Scanner;
 import java.util.Set;
 
@@ -19,8 +29,10 @@ public class WorkerNode {
     private static final long ADOPT_MESSAGE_TAG = 0x5AD0L;
 
     // Parsed startup request: either fully automatic or a hidden manual override (tests/debug).
+    // grpc switches registration/deregistration to the Bootstrap gRPC service;
+    // neighbour links, heartbeats and jobs stay on RMI until their owners migrate.
     record WorkerStartupConfig(boolean auto, int workerId, int rmiPort,
-            String bootstrapHost, int bootstrapPort) {}
+            String bootstrapHost, int bootstrapPort, boolean grpc, int bootstrapGrpcPort) {}
 
     // Holder for a freshly created local registry plus the port it actually bound.
     record LocalRegistry(Registry registry, int port) {}
@@ -31,8 +43,8 @@ public class WorkerNode {
             config = parseArgs(args);
         } catch (IllegalArgumentException e) {
             System.out.println(e.getMessage());
-            System.out.println("Usage: WorkerNode [bootstrapHost bootstrapPort]");
-            System.out.println("   or: WorkerNode <workerId> <rmiPort> <bootstrapHost> <bootstrapPort> (manual override)");
+            System.out.println("Usage: WorkerNode [--grpc [--grpc-port N]] [bootstrapHost bootstrapPort]");
+            System.out.println("   or: WorkerNode [--grpc [--grpc-port N]] <workerId> <rmiPort> <bootstrapHost> <bootstrapPort> (manual override)");
             System.exit(1);
             return;
         }
@@ -50,7 +62,20 @@ public class WorkerNode {
         int rmiPort = -1;
         // Array holder so the hook can read a bootstrap that may never have been created.
         final BootstrapRemote[] bootstrap = new BootstrapRemote[1];
+        // gRPC channel and stub, only set in --grpc mode; the hook closes/deregisters them.
+        final ManagedChannel[] grpcChannel = new ManagedChannel[1];
+        final RegistryServiceGrpc.RegistryServiceBlockingStub[] grpcRegistry =
+                new RegistryServiceGrpc.RegistryServiceBlockingStub[1];
         try {
+            Registry bootstrapRegistry = LocateRegistry.getRegistry(bootstrapHost, bootstrapPort);
+            bootstrap[0] = (BootstrapRemote) bootstrapRegistry.lookup("BootstrapRegistry");
+            if (config.grpc()) {
+                grpcChannel[0] = ManagedChannelBuilder
+                        .forAddress(bootstrapHost, config.bootstrapGrpcPort())
+                        .usePlaintext()
+                        .build();
+                grpcRegistry[0] = RegistryServiceGrpc.newBlockingStub(grpcChannel[0]);
+            }
             if (config.auto()) {
                 // Reserve the port first: no id is burned if every port is taken.
                 LocalRegistry local = createRegistryOnFreePort(
@@ -58,27 +83,42 @@ public class WorkerNode {
                 localRegistry = local.registry();
                 rmiPort = local.port();
 
-                Registry bootstrapRegistry = LocateRegistry.getRegistry(bootstrapHost, bootstrapPort);
-                bootstrap[0] = (BootstrapRemote) bootstrapRegistry.lookup("BootstrapRegistry");
-
                 // One atomic call: id allocation + directory insert + join peer.
-                WorkerRegistration registration = bootstrap[0].registerWorkerAuto(myHost, rmiPort);
-                workerId = registration.workerId();
-                self = bindLocalWorker(localRegistry, workerId, rmiPort, "auto-assigned");
-                joinViaPeer(self, bootstrap[0], registration.peerStub(),
+                // In --grpc mode the id comes from the RegistryService response;
+                // the peer endpoint is resolved back to an RMI stub because
+                // neighbour links stay on RMI until their owners migrate.
+                WorkerRemote peerStub;
+                if (grpcRegistry[0] != null) {
+                    GrpcRegistration granted =
+                            registerViaGrpc(grpcRegistry[0], -1, myHost, rmiPort);
+                    workerId = granted.workerId();
+                    peerStub = lookupGrpcPeer(granted);
+                } else {
+                    WorkerRegistration registration = bootstrap[0].registerWorkerAuto(myHost, rmiPort);
+                    workerId = registration.workerId();
+                    peerStub = registration.peerStub();
+                }
+                self = bindLocalWorker(localRegistry, workerId, rmiPort,
+                        grpcRegistry[0] != null ? "auto-assigned (grpc)" : "auto-assigned");
+                joinViaPeer(self, bootstrap[0], peerStub,
                         workerId, myHost, rmiPort, bootstrapHost, bootstrapPort);
             } else {
                 workerId = config.workerId();
                 rmiPort = config.rmiPort();
                 // Every worker owns its own registry, so each node needs a distinct port.
                 localRegistry = LocateRegistry.createRegistry(rmiPort);
-                self = bindLocalWorker(localRegistry, workerId, rmiPort, "manual");
-
-                Registry bootstrapRegistry = LocateRegistry.getRegistry(bootstrapHost, bootstrapPort);
-                bootstrap[0] = (BootstrapRemote) bootstrapRegistry.lookup("BootstrapRegistry");
+                self = bindLocalWorker(localRegistry, workerId, rmiPort,
+                        grpcRegistry[0] != null ? "manual (grpc)" : "manual");
 
                 // Registration also returns the one peer to join, or null if we are first.
-                WorkerRemote peerStub = bootstrap[0].registerWorker(workerId, myHost, rmiPort);
+                WorkerRemote peerStub;
+                if (grpcRegistry[0] != null) {
+                    GrpcRegistration granted =
+                            registerViaGrpc(grpcRegistry[0], workerId, myHost, rmiPort);
+                    peerStub = lookupGrpcPeer(granted);
+                } else {
+                    peerStub = bootstrap[0].registerWorker(workerId, myHost, rmiPort);
+                }
                 joinViaPeer(self, bootstrap[0], peerStub,
                         workerId, myHost, rmiPort, bootstrapHost, bootstrapPort);
             }
@@ -133,8 +173,19 @@ public class WorkerNode {
                 // best effort on shutdown
             }
             try {
-                if (bootstrap[0] != null) {
+                // Deregister over whichever transport registered us.
+                if (grpcRegistry[0] != null) {
+                    grpcRegistry[0].deregister(DeregisterRequest.newBuilder()
+                            .setWorkerId(idForHook).build());
+                } else if (bootstrap[0] != null) {
                     bootstrap[0].deregisterWorker(idForHook);
+                }
+            } catch (Exception ignored) {
+                // best effort on shutdown
+            }
+            try {
+                if (grpcChannel[0] != null) {
+                    grpcChannel[0].shutdown();
                 }
             } catch (Exception ignored) {
                 // best effort on shutdown
@@ -169,6 +220,47 @@ public class WorkerNode {
         }
     }
 
+    // Assigned id plus the peer endpoint the RegistryService handed back.
+    // workerId -1 means auto-assign (registerWorkerAuto semantics on the server).
+    record GrpcRegistration(int workerId, WorkerEndpoint peer) {}
+
+    // Registers over gRPC: one atomic allocate/claim + insert + peer handoff.
+    // A duplicate manual id surfaces as ALREADY_EXISTS and fails startup below.
+    static GrpcRegistration registerViaGrpc(
+            RegistryServiceGrpc.RegistryServiceBlockingStub registry,
+            int workerId, String myHost, int rmiPort) {
+        RegisterRequest.Builder request = RegisterRequest.newBuilder()
+                .setHost(myHost)
+                .setPort(rmiPort)
+                .setAutoAssign(workerId == -1);
+        if (workerId != -1) {
+            request.setWorkerId(workerId);
+        }
+        RegisterResponse response = registry.register(request.build());
+        System.out.println("Registered over gRPC as Worker " + response.getWorkerId()
+                + (response.getHasPeer()
+                        ? " (peer Worker " + response.getPeer().getWorkerId() + ")"
+                        : " (first worker)"));
+        return new GrpcRegistration(response.getWorkerId(),
+                response.getHasPeer() ? response.getPeer() : null);
+    }
+
+    // Resolves the handed-back endpoint to the RMI stub the neighbour link needs.
+    // Null when first, or when the peer died between handoff and lookup.
+    static WorkerRemote lookupGrpcPeer(GrpcRegistration granted) {
+        if (granted.peer() == null) {
+            return null;
+        }
+        try {
+            Registry peerRegistry = LocateRegistry.getRegistry(
+                    granted.peer().getHost(), granted.peer().getPort());
+            return (WorkerRemote) peerRegistry.lookup("Worker" + granted.peer().getWorkerId());
+        } catch (Exception e) {
+            System.out.println("Peer endpoint unreachable: " + e.getMessage());
+            return null;
+        }
+    }
+
     // Creates the impl and binds it locally; peers look this worker up under exactly this name.
     private static WorkerRemoteImpl bindLocalWorker(Registry localRegistry, int workerId, int rmiPort,
             String tag) throws RemoteException {
@@ -186,27 +278,44 @@ public class WorkerNode {
         return self;
     }
     // or 4 args (hidden manual override for tests/debug). Anything else is rejected.
+    // Leading flags: --grpc registers over gRPC instead of RMI;
+    // --grpc-port N overrides the Bootstrap gRPC port (default 50051, implies --grpc).
     static WorkerStartupConfig parseArgs(String[] args) {
-        if (args.length == 0) {
-            return new WorkerStartupConfig(true, -1, -1, "localhost", Constants.DEFAULT_RMI_PORT);
+        List<String> rest = new ArrayList<>(Arrays.asList(args));
+        boolean grpc = rest.remove("--grpc");
+        int grpcPort = Constants.DEFAULT_GRPC_PORT;
+        int portFlag = rest.indexOf("--grpc-port");
+        if (portFlag != -1) {
+            if (portFlag + 1 >= rest.size()) {
+                throw new IllegalArgumentException("Missing value for --grpc-port.");
+            }
+            grpcPort = parsePort(rest.remove(portFlag + 1), "grpcPort");
+            rest.remove(portFlag);
+            grpc = true;
         }
-        if (args.length == 2) {
-            int bootstrapPort = parsePort(args[1], "bootstrapPort");
-            return new WorkerStartupConfig(true, -1, -1, args[0], bootstrapPort);
+        if (rest.isEmpty()) {
+            return new WorkerStartupConfig(true, -1, -1,
+                    "localhost", Constants.DEFAULT_RMI_PORT, grpc, grpcPort);
         }
-        if (args.length == 4) {
+        if (rest.size() == 2) {
+            int bootstrapPort = parsePort(rest.get(1), "bootstrapPort");
+            return new WorkerStartupConfig(true, -1, -1, rest.get(0), bootstrapPort, grpc, grpcPort);
+        }
+        if (rest.size() == 4) {
             try {
-                int workerId = Integer.parseInt(args[0]);
-                int rmiPort = Integer.parseInt(args[1]);
-                int bootstrapPort = Integer.parseInt(args[3]);
-                return new WorkerStartupConfig(false, workerId, rmiPort, args[2], bootstrapPort);
+                int workerId = Integer.parseInt(rest.get(0));
+                int rmiPort = Integer.parseInt(rest.get(1));
+                int bootstrapPort = Integer.parseInt(rest.get(3));
+                return new WorkerStartupConfig(false, workerId, rmiPort,
+                        rest.get(2), bootstrapPort, grpc, grpcPort);
             } catch (NumberFormatException e) {
                 throw new IllegalArgumentException(
                         "Worker id and ports must be integers: " + e.getMessage());
             }
         }
         throw new IllegalArgumentException(
-                "Expected 0 args (auto), 2 args [bootstrapHost bootstrapPort], or 4 args (manual override).");
+                "Expected 0 args (auto), 2 args [bootstrapHost bootstrapPort], or 4 args (manual override),"
+                        + " optionally preceded by --grpc [--grpc-port N].");
     }
 
     private static int parsePort(String raw, String name) {
