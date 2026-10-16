@@ -131,6 +131,7 @@ mvn exec:exec -Dexec.executable=java -Dexec.args="-classpath %classpath com.cs32
 - `release version 25 not supported` - the IDE or Maven is running on a JDK older than 25. Point it at JDK 25+.
 - A second client exits immediately, or the first one stops receiving results - the two are sharing a callback port. Give each client its own port (see [How to Run](#how-to-run-any-ide-or-terminal)).
 - `Address already in use` on a worker - that RMI port is still held by an earlier run. Pick a different one, or close the old terminal.
+- `NoClassDefFoundError: io/grpc/...` at startup - the node was launched with bare `target/classes`. Every node needs the dependency jars: use `.\run.ps1 <node>` or `java -cp "target/classes;target/dependency/*" ...` after `mvn compile dependency:copy-dependencies`.
 
 ---
 
@@ -140,7 +141,7 @@ mvn exec:exec -Dexec.executable=java -Dexec.args="-classpath %classpath com.cs32
 mvn test
 ```
 
-85 JUnit 5 tests cover the election protocol, duplicate-message handling, job splitting and aggregation, client callbacks, coordinator rotation and thread safety.
+160 JUnit 5 tests cover the election protocol, duplicate-message handling, job splitting and aggregation, client callbacks, coordinator rotation, thread safety, auto-assigned worker ids, partition-healing rewire, the cluster-activity monitor, range warnings, gRPC contract shapes, Bootstrap discovery over gRPC, and job progress streaming.
 
 ---
 
@@ -164,6 +165,19 @@ These are settled interpretations of ambiguous spec points. Keep implementations
 ## Election Protocol
 
 See [docs/election.md](docs/election.md) for propagation, duplicate handling, winner rule, coordinator announcement, and 5-job term.
+
+---
+
+## gRPC contracts
+
+`src/main/proto/` holds the frozen service contracts (`package distrilab`, field numbers must not change once merged — `ProtoContractsTest` enforces service and method names):
+
+- `progress.proto` — `JobProgressService.WatchJob`: live per-worker progress streams (already wired into workers and the GUI, see [Job progress](#job-progress-first-a2-migration-step)).
+- `registry.proto` — `RegistryService`: Bootstrap discovery (register with auto-assign, deregister, job-id allocation, active-worker and address lookup). Served alongside RMI by `BootstrapNode` (second arg = gRPC port, default `50051`); workers opt in with `--grpc`.
+- `election.proto` — `ElectionService` (wave, echo, coordinator announcement) for the election migration; behavior still on RMI.
+- `job.proto` — `JobService` (submit, assign, report) plus `ClientService.DeliverResult` for the client callback; payloads are `PrimeRange` messages or `repeated int32` lists. Dispatch still on RMI.
+
+Maven generates the Java stubs during `compile`. Migration status: progress streaming and Bootstrap discovery are dual-stack; election, jobs, and client callbacks remain RMI until their owners migrate.
 
 ---
 
@@ -314,8 +328,9 @@ and service classes during `compile`; reload the Maven project in your IDE.
 The coordinator retains the latest 256 completed job snapshots, allowing very fast
 jobs to display progress even when they finish before the client subscribes.
 
-This is an incremental migration: job submission, results, discovery, elections,
-and worker task delivery still use RMI. Progress updates are at share completion,
+This is an incremental migration: job submission, results, elections,
+and worker task delivery still use RMI, while progress streaming and Bootstrap
+discovery (registration/deregistration) already speak gRPC. Progress updates are at share completion,
 not within a share. A locally recovered share keeps its originally assigned worker
 label. Interrupted progress streams are displayed explicitly and do not yet reconnect
 automatically or recover across coordinator failure. Full A2 transport migration and
