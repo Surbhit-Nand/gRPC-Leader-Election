@@ -80,9 +80,7 @@ public class BootstrapRegistryImpl extends UnicastRemoteObject implements Bootst
         }
         // Keep the auto counter past any manual id so a future auto-assign cannot collide.
         nextWorkerId.updateAndGet(cur -> Math.max(cur, workerId + 1));
-        return peer == null
-                ? new RegistrationRecord(workerId, null, null)
-                : new RegistrationRecord(workerId, peer.peerId(), peer.address());
+        return toRecord(workerId, peer);
     }
 
     // Monotonic allocation plus directory insert in one atomic step, so a crash
@@ -92,6 +90,11 @@ public class BootstrapRegistryImpl extends UnicastRemoteObject implements Bootst
         PeerSelection peer = findLivePeer();
         int workerId = nextWorkerId.getAndIncrement();
         activeWorkers.put(workerId, new WorkerAddress(rmiHost, rmiPort));
+        return toRecord(workerId, peer);
+    }
+
+    // Null peer means this worker is first: no id or address to hand back.
+    private static RegistrationRecord toRecord(int workerId, PeerSelection peer) {
         return peer == null
                 ? new RegistrationRecord(workerId, null, null)
                 : new RegistrationRecord(workerId, peer.peerId(), peer.address());

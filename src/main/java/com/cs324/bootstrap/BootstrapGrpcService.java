@@ -1,6 +1,7 @@
 package com.cs324.bootstrap;
 
 import com.cs324.bootstrap.BootstrapRegistryImpl.RegistrationRecord;
+import com.cs324.common.WorkerAddress;
 import com.cs324.registry.proto.AllocateJobIdRequest;import com.cs324.registry.proto.AllocateJobIdResponse;
 import com.cs324.registry.proto.DeregisterRequest;
 import com.cs324.registry.proto.DeregisterResponse;
@@ -103,7 +104,7 @@ public class BootstrapGrpcService extends RegistryServiceGrpc.RegistryServiceImp
     public void getWorkerAddress(GetWorkerAddressRequest request,
             StreamObserver<GetWorkerAddressResponse> responseObserver) {
         try {
-            com.cs324.common.WorkerAddress address =
+            WorkerAddress address =
                     directory.getWorkerAddress(request.getWorkerId());
             GetWorkerAddressResponse.Builder reply = GetWorkerAddressResponse.newBuilder()
                     .setFound(address != null);
