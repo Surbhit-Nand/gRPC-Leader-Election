@@ -76,6 +76,52 @@ class WorkerNodeArgsTest {
     }
 
     @Test
+    void grpcFlagSwitchesTransportWithDefaultGrpcPort() {
+        WorkerNode.WorkerStartupConfig config =
+                WorkerNode.parseArgs(new String[]{"--grpc", "myhost", "2099"});
+
+        assertTrue(config.auto());
+        assertTrue(config.grpc());
+        assertEquals("myhost", config.bootstrapHost());
+        assertEquals(2099, config.bootstrapPort());
+        assertEquals(Constants.DEFAULT_GRPC_PORT, config.bootstrapGrpcPort());
+    }
+
+    @Test
+    void grpcPortFlagImpliesGrpcAndOverridesPort() {
+        WorkerNode.WorkerStartupConfig config = WorkerNode.parseArgs(
+                new String[]{"--grpc-port", "50060"});
+
+        assertTrue(config.auto());
+        assertTrue(config.grpc());
+        assertEquals(50060, config.bootstrapGrpcPort());
+        assertEquals("localhost", config.bootstrapHost());
+    }
+
+    @Test
+    void grpcFlagsCombineWithManualOverride() {
+        WorkerNode.WorkerStartupConfig config = WorkerNode.parseArgs(
+                new String[]{"--grpc", "7", "3600", "myhost", "2099"});
+
+        assertTrue(!config.auto());
+        assertTrue(config.grpc());
+        assertEquals(7, config.workerId());
+        assertEquals(3600, config.rmiPort());
+    }
+
+    @Test
+    void grpcPortWithoutValueIsRejected() {
+        assertThrows(IllegalArgumentException.class,
+                () -> WorkerNode.parseArgs(new String[]{"--grpc-port"}));
+    }
+
+    @Test
+    void plainFormsDefaultToRmiRegistration() {
+        assertTrue(!WorkerNode.parseArgs(new String[0]).grpc());
+        assertTrue(!WorkerNode.parseArgs(new String[]{"myhost", "2099"}).grpc());
+    }
+
+    @Test
     void freePortScanBindsBaseThenNext() throws Exception {
         int base = 47200;
         WorkerNode.LocalRegistry first = WorkerNode.createRegistryOnFreePort(base, 50);

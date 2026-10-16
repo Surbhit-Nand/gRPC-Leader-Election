@@ -47,52 +47,95 @@ public class BootstrapRegistryImpl extends UnicastRemoteObject implements Bootst
 
     @Override
     public WorkerRemote registerWorker(int workerId, String rmiHost, int rmiPort) throws RemoteException {
-        WorkerRemote peerStub = findLivePeer();
-        // putIfAbsent makes duplicate-id detection atomic; containsKey+put lost updates.
-        WorkerAddress prev = activeWorkers.putIfAbsent(workerId, new WorkerAddress(rmiHost, rmiPort));
-        // Ids must be unique, so a collision is an error the caller must fix.
-        if (prev != null) {
-            throw new RemoteException("Duplicate worker id " + workerId + " - already registered");
-        }
-        // Keep the auto counter past any manual id so a future auto-assign cannot collide.
-        nextWorkerId.updateAndGet(cur -> Math.max(cur, workerId + 1));
-        return peerStub;
+        RegistrationRecord record = registerRecord(workerId, rmiHost, rmiPort);
+        return stubForPeer(record);
     }
 
     @Override
-    public synchronized WorkerRegistration registerWorkerAuto(String rmiHost, int rmiPort)
+    public WorkerRegistration registerWorkerAuto(String rmiHost, int rmiPort)
             throws RemoteException {
-        // Peer first so the newcomer is never handed itself; allocation + insert are one
-        // atomic step, so a crash cannot burn an id without registering it.
-        WorkerRemote peerStub = findLivePeer();
-        int workerId = nextWorkerId.getAndIncrement();
-        activeWorkers.put(workerId, new WorkerAddress(rmiHost, rmiPort));
-        return new WorkerRegistration(workerId, peerStub);
+        RegistrationRecord record = registerAutoRecord(rmiHost, rmiPort);
+        return new WorkerRegistration(record.workerId(), stubForPeer(record));
     }
+
+    // Registration result as data, without RMI stubs: the backing call for the
+    // gRPC service. peerId/peerAddress are null when this worker is first.
+    record RegistrationRecord(int workerId, Integer peerId, WorkerAddress peerAddress) {}
 
     @Override
     public List<Integer> getAllocatedWorkerIds() throws RemoteException {
         return getActiveWorkerIds();
     }
 
+    // Manual claim of one id; duplicates fail with DuplicateWorkerIdException.
+    synchronized RegistrationRecord registerRecord(int workerId, String rmiHost, int rmiPort)
+            throws DuplicateWorkerIdException {
+        // Peer first so the newcomer is never handed itself.
+        PeerSelection peer = findLivePeer();
+        // putIfAbsent makes duplicate-id detection atomic; containsKey+put lost updates.
+        // Ids must be unique, so a collision is an error the caller must fix.
+        WorkerAddress prev = activeWorkers.putIfAbsent(workerId, new WorkerAddress(rmiHost, rmiPort));
+        if (prev != null) {
+            throw new DuplicateWorkerIdException(workerId);
+        }
+        // Keep the auto counter past any manual id so a future auto-assign cannot collide.
+        nextWorkerId.updateAndGet(cur -> Math.max(cur, workerId + 1));
+        return toRecord(workerId, peer);
+    }
+
+    // Monotonic allocation plus directory insert in one atomic step, so a crash
+    // cannot burn an id without registering it.
+    synchronized RegistrationRecord registerAutoRecord(String rmiHost, int rmiPort) {
+        // Peer first so the newcomer is never handed itself.
+        PeerSelection peer = findLivePeer();
+        int workerId = nextWorkerId.getAndIncrement();
+        activeWorkers.put(workerId, new WorkerAddress(rmiHost, rmiPort));
+        return toRecord(workerId, peer);
+    }
+
+    // Null peer means this worker is first: no id or address to hand back.
+    private static RegistrationRecord toRecord(int workerId, PeerSelection peer) {
+        return peer == null
+                ? new RegistrationRecord(workerId, null, null)
+                : new RegistrationRecord(workerId, peer.peerId(), peer.address());
+    }
+
+    // Resolves the recorded peer back to a live stub; null when first, or when
+    // the peer died in the race between the pick and this lookup.
+    private static WorkerRemote stubForPeer(RegistrationRecord record) {
+        if (record.peerId() == null) {
+            return null;
+        }
+        try {
+            Registry peerRegistry = LocateRegistry.getRegistry(
+                    record.peerAddress().getRmiHost(), record.peerAddress().getRmiPort());
+            return (WorkerRemote) peerRegistry.lookup("Worker" + record.peerId());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    // Chosen join peer: id plus published address plus the stub that proved it
+    // live, all from one lookup. Null means this worker is first in the cluster.
+    private record PeerSelection(int peerId, WorkerAddress address, WorkerRemote stub) {}
+
     // Shared peer-pick for manual and auto registration: shuffled snapshot, first live wins.
-    private WorkerRemote findLivePeer() throws RemoteException {
+    private PeerSelection findLivePeer() {
         // Copy workers before picking a peer, so the newcomer is never handed itself.
         List<Map.Entry<Integer, WorkerAddress>> snapshot = new ArrayList<>(activeWorkers.entrySet());
         // Shuffled per call, so joins are not biased towards the lowest worker id.
         Collections.shuffle(snapshot, new Random());
 
-        // The peer handed back; null means this worker is first in the cluster.
-        WorkerRemote peerStub = null;
         // Try candidates in turn, so one dead entry cannot block a join.
         for (Map.Entry<Integer, WorkerAddress> candidate : snapshot) {
             try {
                 // Contact the candidate's registry.
                 Registry peerRegistry = LocateRegistry.getRegistry(
                         candidate.getValue().getRmiHost(), candidate.getValue().getRmiPort());
-                // Look up the peer worker.
-                peerStub = (WorkerRemote) peerRegistry.lookup("Worker" + candidate.getKey());
-                break; // first live peer wins
+                // Look up the peer worker; the first live peer wins.
+                WorkerRemote peerStub =
+                        (WorkerRemote) peerRegistry.lookup("Worker" + candidate.getKey());
+                return new PeerSelection(candidate.getKey(), candidate.getValue(), peerStub);
             } catch (NotBoundException e) {
                 // Stale entry: prune it so it stops blocking future joins.
                 // Conditional remove, so a live re-registration is not deleted.
@@ -101,7 +144,8 @@ public class BootstrapRegistryImpl extends UnicastRemoteObject implements Bootst
                 // Peer unreachable right now: try the next candidate.
             }
         }
-        return peerStub;
+        // No live peer: this worker is first, so there is nothing to join.
+        return null;
     }
 
     @Override

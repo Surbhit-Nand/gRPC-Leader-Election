@@ -57,12 +57,12 @@ public class ClientApp extends JFrame {
 
     // The model stores submitted jobs; JTable displays them. Users cannot edit the rows.
     private final DefaultTableModel jobModel = new DefaultTableModel(
-            new String[]{"Job ID", "Operation", "Input", "Status", "Result", "Progress"},
+            new String[]{"Job ID", "Operation", "Input", "Status", "Result", "Progress", "Actions"},
             0
     ) {
         @Override
         public boolean isCellEditable(int row, int column) {
-            return false;
+            return column == 6;
         }
     };
 
@@ -91,15 +91,16 @@ public class ClientApp extends JFrame {
     // Cluster-activity view: worker snapshot table plus a feed of derived happenings.
     // Polling only — workers expose no extra state, events come from snapshot diffs.
     private final DefaultTableModel clusterModel = new DefaultTableModel(
-            new String[]{"Worker", "Role", "Coordinator view", "Neighbours", "JAC", "Status"},
+            new String[]{"Worker", "Role", "Coordinator view", "Neighbours", "JAC", "Status", "Actions"},
             0
     ) {
         @Override
         public boolean isCellEditable(int row, int column) {
-            return false;
+            return column == 6;
         }
     };
     private final JTextArea clusterFeed = new JTextArea();
+    private final JCheckBox autoScroll = new JCheckBox("Auto-scroll", true);
     private final JLabel clusterStatusLabel = new JLabel("Connecting to cluster...");
     private final ArrayDeque<String> clusterFeedLines = new ArrayDeque<>();
     private static final int CLUSTER_FEED_MAX_LINES = 100;
@@ -120,39 +121,38 @@ public class ClientApp extends JFrame {
         this.clientPort = clientPort;
 
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        setMinimumSize(new Dimension(900, 780));
+        setMinimumSize(new Dimension(1000, 700));
 
         // Outer layout: heading at the top, workspace in the centre, status at the bottom.
-        JPanel root = new JPanel(new BorderLayout(0, 20));
+        JPanel root = new JPanel(new BorderLayout(0, 10));
         root.setBackground(BACKGROUND);
-        root.setBorder(BorderFactory.createEmptyBorder(24, 28, 16, 28));
+        root.setBorder(BorderFactory.createEmptyBorder(8, 10, 8, 10));
         setContentPane(root);
 
-        // The heading includes a breadcrumb and decorative server graphic.
-        JPanel header = ClientStyle.header();
-        header.setBorder(BorderFactory.createEmptyBorder(0, 20, 6, 20));
+        // Preserve the workspace heading and content with the refreshed palette.
+        JPanel header = transparentPanel(new BorderLayout());
+        header.setBorder(BorderFactory.createEmptyBorder(0, 10, 2, 10));
         JPanel heading = transparentPanel(null);
-        // BoxLayout stacks breadcrumb, title and subtitle; struts give the vertical gaps.
         heading.setLayout(new BoxLayout(heading, BoxLayout.Y_AXIS));
         JLabel breadcrumb = label("CS324   /   Distributed computing", 13, Font.PLAIN, MUTED);
-        breadcrumb.setIcon(icon("home", 18, MUTED));
+        breadcrumb.setIcon(icon("network", 20, BLUE));
         breadcrumb.setIconTextGap(10);
         heading.add(breadcrumb);
-        heading.add(Box.createVerticalStrut(14));
-        heading.add(label("Job workspace", 30, Font.BOLD, INK));
-        heading.add(Box.createVerticalStrut(5));
-        heading.add(label("Prepare your data and review computational jobs.", 16, Font.PLAIN, MUTED));
+        heading.add(Box.createVerticalStrut(4));
+        heading.add(label("Job workspace", 24, Font.BOLD, INK));
+        heading.add(Box.createVerticalStrut(3));
+        heading.add(label("Prepare your data and review computational jobs.", 13, Font.PLAIN, MUTED));
         header.add(heading, BorderLayout.CENTER);
         root.add(header, BorderLayout.NORTH);
 
         // Rounded cards group the form and submitted job history.
         JPanel workspace = new Workspace();
-        JPanel composer = card(new BorderLayout(0, 20));
+        JPanel composer = card(new BorderLayout(0, 10));
         composer.add(sectionHeading("New job", "Choose an operation and provide input data.", "document"),
                 BorderLayout.NORTH);
 
         // Operation selection determines the example text and validation rules.
-        JPanel fields = transparentPanel(new BorderLayout(0, 16));
+        JPanel fields = transparentPanel(new BorderLayout(0, 8));
         JPanel selectorPanel = transparentPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
         JLabel operationLabel = label("Operation   ", 14, Font.BOLD, INK);
         operationLabel.setLabelFor(jobTypeBox);
@@ -184,7 +184,7 @@ public class ClientApp extends JFrame {
                 return this;
             }
         });
-        jobTypeBox.setPreferredSize(new Dimension(240, 44));
+        jobTypeBox.setPreferredSize(new Dimension(200, 32));
         selectorPanel.add(jobTypeBox);
         JPanel operationRow = transparentPanel(new BorderLayout());
         operationRow.add(selectorPanel, BorderLayout.WEST);
@@ -215,7 +215,7 @@ public class ClientApp extends JFrame {
         inputScroll.setBorder(new RoundBorder(false));
         inputScroll.setBackground(Color.WHITE);
         inputScroll.getViewport().setBackground(Color.WHITE);
-        inputScroll.setPreferredSize(new Dimension(700, 100));
+        inputScroll.setPreferredSize(new Dimension(700, 68));
         inputPanel.add(inputScroll, BorderLayout.CENTER);
         inputPanel.add(label("CSV: integers separated by commas; no headers or quotes. "
                         + "Select several files to merge them into one job. Up to 1 MB in total.",
@@ -245,7 +245,7 @@ public class ClientApp extends JFrame {
         workspace.add(composer, BorderLayout.NORTH);
 
         // The second card switches between the empty state and submitted jobs.
-        JPanel history = card(new BorderLayout(0, 14));
+        JPanel history = card(new BorderLayout(0, 8));
         JPanel historyHeading = transparentPanel(new BorderLayout());
         historyHeading.add(sectionHeading("Job history",
                 "Track submitted jobs and their final results.", "list"), BorderLayout.CENTER);
@@ -273,7 +273,7 @@ public class ClientApp extends JFrame {
         jobTable.setSelectionBackground(LIGHT_BLUE);
         jobTable.setSelectionForeground(INK);
         jobTable.getTableHeader().setReorderingAllowed(false);
-        jobTable.getTableHeader().setPreferredSize(new Dimension(0, 38));
+        jobTable.getTableHeader().setPreferredSize(new Dimension(0, 30));
 
         // Use white rows and subtle horizontal rules, preserving selection contrast.
         jobTable.setDefaultRenderer(Object.class, new DefaultTableCellRenderer() {
@@ -316,7 +316,9 @@ public class ClientApp extends JFrame {
         jobTable.getTableHeader().setBackground(Color.WHITE);
         jobTable.getTableHeader().setForeground(MUTED);
         // Explicit widths; automatic sizing would let the Input column collapse.
-        int[] widths = {115, 115, 130, 215, 145};
+        jobTable.getColumnModel().getColumn(3).setCellRenderer(new StatusRenderer());
+        jobTable.getColumnModel().getColumn(1).setCellRenderer(new TagRenderer());
+        int[] widths = {70, 115, 170, 125, 140, 230, 90};
         for (int i = 0; i < widths.length; i++) {
             jobTable.getColumnModel().getColumn(i).setPreferredWidth(widths[i]);
         }
@@ -348,7 +350,7 @@ public class ClientApp extends JFrame {
         emptyText.add(emptyHint);
         emptyState.add(emptyText);
         historyContent.setBackground(Color.WHITE);
-        historyContent.setPreferredSize(new Dimension(750, 120));
+        historyContent.setPreferredSize(new Dimension(750, 125));
         historyContent.add(emptyState, "empty");
         historyContent.add(resultsPane, "table");
         historyLayout.show(historyContent, "empty");
@@ -395,17 +397,17 @@ public class ClientApp extends JFrame {
         clusterTimer = new javax.swing.Timer(CLUSTER_POLL_MS, event -> refreshClusterNow());
         clusterTimer.setInitialDelay(500);
         clusterTimer.start();
-        setSize(1120, 870);
+        setSize(1180, 940);
         setLocationRelativeTo(null);
     }
 
     // Third workspace card: live worker table, happening feed, and refresh controls.
     private JPanel buildClusterCard() {
-        JPanel cluster = card(new BorderLayout(0, 14));
+        JPanel cluster = card(new BorderLayout(0, 8));
         JPanel heading = transparentPanel(new BorderLayout());
         heading.add(sectionHeading("Cluster activity",
                 "Live workers and what is happening between them.", "eye"), BorderLayout.CENTER);
-        JButton refreshButton = button("Refresh", "info", false);
+        JButton refreshButton = button("Refresh", "refresh", false);
         refreshButton.setMnemonic('R');
         refreshButton.setToolTipText("Poll the cluster now instead of waiting for the next update.");
         refreshButton.addActionListener(event -> refreshClusterNow());
@@ -414,8 +416,8 @@ public class ClientApp extends JFrame {
 
         JTable clusterTable = new JTable(clusterModel);
         clusterTable.setFillsViewportHeight(true);
-        clusterTable.setFont(BODY.deriveFont(13f));
-        clusterTable.setRowHeight(32);
+        clusterTable.setFont(BODY.deriveFont(11f));
+        clusterTable.setRowHeight(28);
         clusterTable.setShowVerticalLines(false);
         clusterTable.setGridColor(LINE);
         clusterTable.setIntercellSpacing(new Dimension(0, 1));
@@ -436,23 +438,36 @@ public class ClientApp extends JFrame {
                 return this;
             }
         });
-        int[] widths = {90, 120, 140, 160, 80, 120};
+        styleTableHeader(clusterTable);
+        clusterTable.getColumnModel().getColumn(5).setCellRenderer(new StatusRenderer());
+        clusterTable.getColumnModel().getColumn(1).setCellRenderer(new TagRenderer());
+        installDetailsAction(clusterTable, 6, row -> {
+            StringBuilder details = new StringBuilder();
+            for (int column = 0; column < 6; column++) {
+                details.append(clusterModel.getColumnName(column)).append(": ")
+                        .append(clusterModel.getValueAt(row, column)).append("\n");
+            }
+            JOptionPane.showMessageDialog(this, details.toString(), "Worker details", JOptionPane.INFORMATION_MESSAGE);
+        });
+        int[] widths = {70, 95, 105, 80, 40, 110, 80};
         for (int i = 0; i < widths.length; i++) {
             clusterTable.getColumnModel().getColumn(i).setPreferredWidth(widths[i]);
         }
         JScrollPane clusterPane = new JScrollPane(clusterTable);
         clusterPane.setBorder(BorderFactory.createEmptyBorder());
         clusterPane.getViewport().setBackground(Color.WHITE);
-        clusterPane.setPreferredSize(new Dimension(750, 110));
+        clusterPane.setPreferredSize(new Dimension(610, 130));
         cluster.add(clusterPane, BorderLayout.CENTER);
 
         clusterFeed.setEditable(false);
-        clusterFeed.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        clusterFeed.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
+        clusterFeed.setMargin(new Insets(6, 10, 6, 10));
+        ((javax.swing.text.DefaultCaret) clusterFeed.getCaret()).setUpdatePolicy(javax.swing.text.DefaultCaret.NEVER_UPDATE);
         clusterFeed.setForeground(INK);
         clusterFeed.setBackground(Color.WHITE);
         clusterFeed.setText("Waiting for the first cluster poll...");
         JScrollPane feedPane = new JScrollPane(clusterFeed);
-        feedPane.setBorder(new RoundBorder(false));
+        feedPane.setBorder(BorderFactory.createLineBorder(LINE));
         feedPane.getViewport().setBackground(Color.WHITE);
         feedPane.setPreferredSize(new Dimension(750, 120));
 
@@ -463,11 +478,32 @@ public class ClientApp extends JFrame {
         clusterStatusLabel.setIconTextGap(8);
         clusterFooter.add(clusterStatusLabel, BorderLayout.CENTER);
 
-        JPanel south = transparentPanel(new BorderLayout(0, 8));
-        south.add(feedPane, BorderLayout.CENTER);
-        south.add(clusterFooter, BorderLayout.SOUTH);
-        cluster.add(south, BorderLayout.SOUTH);
-        return cluster;
+        JPanel log = card(new BorderLayout(0, 8));
+        JPanel logHeader = new JPanel(new BorderLayout());
+        logHeader.setBackground(LIGHT_BLUE);
+        logHeader.setBorder(BorderFactory.createEmptyBorder(4, 10, 4, 8));
+        JLabel logTitle = label("System log", 12, Font.BOLD, INK);
+        logTitle.setIcon(icon("list", 15, MUTED));
+        logHeader.add(logTitle, BorderLayout.WEST);
+        autoScroll.setOpaque(false);
+        autoScroll.setFont(BODY.deriveFont(11f));
+        autoScroll.setForeground(MUTED);
+        logHeader.add(autoScroll, BorderLayout.EAST);
+        log.add(logHeader, BorderLayout.NORTH);
+        log.add(feedPane, BorderLayout.CENTER);
+        cluster.add(clusterFooter, BorderLayout.SOUTH);
+        // Both panels remain independently scrollable; the divider can be resized.
+        JSplitPane activity = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, cluster, log);
+        activity.setBorder(BorderFactory.createEmptyBorder());
+        activity.setOpaque(false);
+        activity.setDividerSize(8);
+        activity.setResizeWeight(0.62);
+        cluster.setMinimumSize(new Dimension(520, 210));
+        log.setMinimumSize(new Dimension(260, 210));
+        log.setPreferredSize(new Dimension(390, 210));
+        JPanel activityRow = transparentPanel(new BorderLayout());
+        activityRow.add(activity, BorderLayout.CENTER);
+        return activityRow;
     }
 
     // One poll off the EDT: snapshot the cluster, diff against the last view,
@@ -533,8 +569,10 @@ public class ClientApp extends JFrame {
         while (clusterFeedLines.size() > CLUSTER_FEED_MAX_LINES) {
             clusterFeedLines.removeFirst();
         }
+        int previousCaret = clusterFeed.getCaretPosition();
         clusterFeed.setText(String.join("\n", clusterFeedLines));
-        clusterFeed.setCaretPosition(clusterFeed.getDocument().getLength());
+        clusterFeed.setCaretPosition(autoScroll.isSelected() ? clusterFeed.getDocument().getLength()
+                : Math.min(previousCaret, clusterFeed.getDocument().getLength()));
         int workers = snapshot.rows().size();
         String coordinator = snapshot.consensusCoordinator() == -1
                 ? "no coordinator yet" : "coordinator Worker " + snapshot.consensusCoordinator();
@@ -572,7 +610,7 @@ public class ClientApp extends JFrame {
         heading.add(badge(symbol), BorderLayout.WEST);
         JPanel text = transparentPanel(null);
         text.setLayout(new BoxLayout(text, BoxLayout.Y_AXIS));
-        text.add(label(title, 20, Font.BOLD, INK));
+        text.add(label(title, 18, Font.BOLD, INK));
         text.add(Box.createVerticalStrut(3));
         text.add(label(description, 13, Font.PLAIN, MUTED));
         heading.add(text, BorderLayout.CENTER);
@@ -861,7 +899,6 @@ public class ClientApp extends JFrame {
                     return;
                 }
 
-                final int submittedCoordinatorId = coordinatorId;
                 // A fast result can already be queued, so this can overwrite its status.
 
                 SwingUtilities.invokeLater(() -> {
@@ -869,7 +906,7 @@ public class ClientApp extends JFrame {
                     jobModel.setValueAt(jobId, modelRow, 0);
                     if (!rowByJobId.containsKey(jobId)) return;
                     jobModel.setValueAt(
-                            "Submitted to coordinator " + submittedCoordinatorId,
+                            "Processing",
                             modelRow,
                             3
                     );

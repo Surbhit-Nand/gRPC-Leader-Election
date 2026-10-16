@@ -38,11 +38,21 @@ To run the Bootstrap Node, the Workers and the Client, see [How to Run](#how-to-
 
 ## How to Run (any IDE or terminal)
 
-The project uses gRPC runtime dependencies. The build command above copies them to `target/dependency`. The commands below use the Windows classpath separator (`;`); use `:` on Linux/macOS. These commands behave the same in VS Code, IntelliJ, Eclipse and a plain terminal; Apache NetBeans needs extra setup for the worker, see [Apache NetBeans](#apache-netbeans). Every node is a separate process, so start each one in its own terminal.
+The project uses gRPC runtime dependencies. The build command above copies them to `target/dependency`. The quickest way to run anything below is the helper script (one terminal per node, project root) — it carries the right classpath automatically:
+
+```
+.\run.ps1 build                  # compile + fetch the jars (run once first)
+.\run.ps1 bootstrap              # Bootstrap Node (start first, one only)
+.\run.ps1 worker                  # Worker Node (repeat per terminal)
+.\run.ps1 client                  # Client GUI (repeat per terminal, see ports below)
+```
+
+The equivalent manual `java` commands follow for any IDE or terminal; they behave the same in VS Code, IntelliJ, Eclipse and a plain terminal; Apache NetBeans needs extra setup for the worker, see [Apache NetBeans](#apache-netbeans). The commands below use the Windows classpath separator (`;`); use `:` on Linux/macOS. Every node is a separate process, so start each one in its own terminal.
 
 **All nodes run on the same machine** (`localhost`), one terminal each.
 
-Bootstrap Node (start first, one only):
+Bootstrap Node (start first, one only). The optional second argument is the
+gRPC registry port (default `50051`); RMI keeps the first:
 
 ```
 java -cp "target/classes;target/dependency/*" com.cs324.bootstrap.BootstrapNode 1099
@@ -55,6 +65,10 @@ worker id and the worker picks the first free RMI port from 3500 upward:
 java -cp "target/classes;target/dependency/*" com.cs324.worker.WorkerNode localhost 1099
 java -cp "target/classes;target/dependency/*" com.cs324.worker.WorkerNode localhost 1099
 ```
+
+Prefix `--grpc` (optionally `--grpc-port N`, default `50051`) to register over
+the gRPC `RegistryService` instead of RMI — same ids, same peer handoff.
+Neighbour links, heartbeats and jobs still use RMI until their owners migrate.
 
 Each run prints the assigned id, e.g. `Worker 1 bound as Worker1 on port 3500 (auto-assigned)`.
 Ids are never reused within one Bootstrap run (a middle id left by a departed worker stays
@@ -70,6 +84,8 @@ java -cp "target/classes;target/dependency/*" com.cs324.client.ClientApp localho
 ```
 
 The arguments are `bootstrapHost bootstrapPort clientRmiPort`; all three are optional and default to `localhost 1099 1199`.
+
+> The `java` commands above and `.\run.ps1 bootstrap|worker|client` are interchangeable — the script just fills in the defaults shown here. A bare `java -cp target/classes ...` (without `target/dependency/*`) will fail with `NoClassDefFoundError: io/grpc/...` because the gRPC jars live in `target/dependency`.
 
 ### VS Code
 
@@ -126,6 +142,7 @@ mvn exec:exec -Dexec.executable=java -Dexec.args="-classpath %classpath com.cs32
 - `release version 25 not supported` - the IDE or Maven is running on a JDK older than 25. Point it at JDK 25+.
 - A second client exits immediately, or the first one stops receiving results - the two are sharing a callback port. Give each client its own port (see [How to Run](#how-to-run-any-ide-or-terminal)).
 - `Address already in use` on a worker - that RMI port is still held by an earlier run. Pick a different one, or close the old terminal.
+- `NoClassDefFoundError: io/grpc/...` at startup - the node was launched with bare `target/classes`. Every node needs the dependency jars: use `.\run.ps1 <node>` or `java -cp "target/classes;target/dependency/*" ...` after `mvn compile dependency:copy-dependencies`.
 
 ---
 
@@ -135,7 +152,7 @@ mvn exec:exec -Dexec.executable=java -Dexec.args="-classpath %classpath com.cs32
 mvn test
 ```
 
-85 JUnit 5 tests cover the election protocol, duplicate-message handling, job splitting and aggregation, client callbacks, coordinator rotation and thread safety.
+160 JUnit 5 tests cover the election protocol, duplicate-message handling, job splitting and aggregation, client callbacks, coordinator rotation, thread safety, auto-assigned worker ids, partition-healing rewire, the cluster-activity monitor, range warnings, gRPC contract shapes, Bootstrap discovery over gRPC, and job progress streaming.
 
 ---
 
@@ -159,6 +176,19 @@ These are settled interpretations of ambiguous spec points. Keep implementations
 ## Election Protocol
 
 See [docs/election.md](docs/election.md) for propagation, duplicate handling, winner rule, coordinator announcement, and 5-job term.
+
+---
+
+## gRPC contracts
+
+`src/main/proto/` holds the frozen service contracts (`package distrilab`, field numbers must not change once merged — `ProtoContractsTest` enforces service and method names):
+
+- `progress.proto` — `JobProgressService.WatchJob`: live per-worker progress streams (already wired into workers and the GUI, see [Job progress](#job-progress-first-a2-migration-step)).
+- `registry.proto` — `RegistryService`: Bootstrap discovery (register with auto-assign, deregister, job-id allocation, active-worker and address lookup). Served alongside RMI by `BootstrapNode` (second arg = gRPC port, default `50051`); workers opt in with `--grpc`.
+- `election.proto` — `ElectionService` (wave, echo, coordinator announcement) for the election migration; behavior still on RMI.
+- `job.proto` — `JobService` (submit, assign, report) plus `ClientService.DeliverResult` for the client callback; payloads are `PrimeRange` messages or `repeated int32` lists. Dispatch still on RMI.
+
+Maven generates the Java stubs during `compile`. Migration status: progress streaming and Bootstrap discovery are dual-stack; election, jobs, and client callbacks remain RMI until their owners migrate.
 
 ---
 
@@ -309,8 +339,9 @@ and service classes during `compile`; reload the Maven project in your IDE.
 The coordinator retains the latest 256 completed job snapshots, allowing very fast
 jobs to display progress even when they finish before the client subscribes.
 
-This is an incremental migration: job submission, results, discovery, elections,
-and worker task delivery still use RMI. Progress updates are at share completion,
+This is an incremental migration: job submission, results, elections,
+and worker task delivery still use RMI, while progress streaming and Bootstrap
+discovery (registration/deregistration) already speak gRPC. Progress updates are at share completion,
 not within a share. A locally recovered share keeps its originally assigned worker
 label. Interrupted progress streams are displayed explicitly and do not yet reconnect
 automatically or recover across coordinator failure. Full A2 transport migration and
