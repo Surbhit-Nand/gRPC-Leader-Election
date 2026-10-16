@@ -6,6 +6,7 @@ import com.cs324.registry.proto.AllocateJobIdRequest;
 import com.cs324.registry.proto.DeregisterRequest;
 import com.cs324.registry.proto.GetActiveWorkersRequest;
 import com.cs324.registry.proto.GetWorkerAddressRequest;
+import com.cs324.registry.proto.GetWorkerAddressResponse;
 import com.cs324.registry.proto.RegisterRequest;
 import com.cs324.registry.proto.RegisterResponse;
 import com.cs324.registry.proto.RegistryServiceGrpc;
@@ -175,12 +176,12 @@ class BootstrapGrpcTest {
     void workerAddressReportsFoundAndMissing() {
         registry.register(auto("localhost", 3500));
 
-        var present = registry.getWorkerAddress(
+        GetWorkerAddressResponse present = registry.getWorkerAddress(
                 GetWorkerAddressRequest.newBuilder().setWorkerId(1).build());
         assertTrue(present.getFound());
         assertEquals(3500, present.getWorker().getPort());
 
-        var missing = registry.getWorkerAddress(
+        GetWorkerAddressResponse missing = registry.getWorkerAddress(
                 GetWorkerAddressRequest.newBuilder().setWorkerId(99).build());
         assertFalse(missing.getFound());
     }
