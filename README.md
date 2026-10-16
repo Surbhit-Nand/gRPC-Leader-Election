@@ -33,7 +33,16 @@ To run the Bootstrap Node, the Workers and the Client, see [How to Run](#how-to-
 
 ## How to Run (any IDE or terminal)
 
-The project uses gRPC runtime dependencies. The build command above copies them to `target/dependency`. The commands below use the Windows classpath separator (`;`); use `:` on Linux/macOS. These commands behave the same in VS Code, IntelliJ, Eclipse and a plain terminal; Apache NetBeans needs extra setup for the worker, see [Apache NetBeans](#apache-netbeans). Every node is a separate process, so start each one in its own terminal.
+The project uses gRPC runtime dependencies. The build command above copies them to `target/dependency`. The quickest way to run anything below is the helper script (one terminal per node, project root) — it carries the right classpath automatically:
+
+```
+.\run.ps1 build                  # compile + fetch the jars (run once first)
+.\run.ps1 bootstrap              # Bootstrap Node (start first, one only)
+.\run.ps1 worker                  # Worker Node (repeat per terminal)
+.\run.ps1 client                  # Client GUI (repeat per terminal, see ports below)
+```
+
+The equivalent manual `java` commands follow for any IDE or terminal; they behave the same in VS Code, IntelliJ, Eclipse and a plain terminal; Apache NetBeans needs extra setup for the worker, see [Apache NetBeans](#apache-netbeans). The commands below use the Windows classpath separator (`;`); use `:` on Linux/macOS. Every node is a separate process, so start each one in its own terminal.
 
 **All nodes run on the same machine** (`localhost`), one terminal each.
 
@@ -71,10 +80,7 @@ java -cp "target/classes;target/dependency/*" com.cs324.client.ClientApp localho
 
 The arguments are `bootstrapHost bootstrapPort clientRmiPort`; all three are optional and default to `localhost 1099 1199`.
 
-> Shortcut: `.\run.ps1 build` compiles and fetches the jars, then `.\run.ps1 bootstrap`,
-> `.\run.ps1 worker`, and `.\run.ps1 client` launch each node with the right classpath.
-> A bare `java -cp target/classes ...` will fail with `NoClassDefFoundError: io/grpc/...`
-> because the gRPC jars live in `target/dependency`.
+> The `java` commands above and `.\run.ps1 bootstrap|worker|client` are interchangeable — the script just fills in the defaults shown here. A bare `java -cp target/classes ...` (without `target/dependency/*`) will fail with `NoClassDefFoundError: io/grpc/...` because the gRPC jars live in `target/dependency`.
 
 ### VS Code
 
