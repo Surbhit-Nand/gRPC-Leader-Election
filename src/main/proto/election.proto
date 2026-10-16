@@ -1,0 +1,53 @@
+// Leader-election contract: the gRPC twin of the WorkerRemote election surface.
+// Field numbers are FROZEN once merged. Behavior is NOT specified here and
+// stays with Member 2 (echo wave, JAC-then-highest-id winner rule, duplicate
+// suppression, coordinator announcement relay, 5-job term). This file only
+// fixes the shapes those behaviors travel in.
+//
+// Mapping notes for the implementer:
+// - All three RMI calls return void, so every rpc answers an empty ack;
+//   a transport error IS the signal (same role as RemoteException today:
+//   prune the edge from the wave and rewire past it).
+// - message_id is int64 with the sender id in the high bits (matches the
+//   current ((long) id << 32) | counter scheme); coordinator announcements
+//   keep the +1000000 offset convention out of the election-id space.
+// - Neighbour addressing reuses RegistryService.getWorkerAddress; no new
+//   discovery is introduced here.
+syntax = "proto3";
+package distrilab;
+option java_package = "com.cs324.election.proto";
+option java_multiple_files = true;
+
+service ElectionService {
+  // One election wave hop, forwarded to every neighbour except the sender.
+  rpc SendElection(ElectionMessage) returns (ElectionAck);
+  // One subtree answer, echoed back toward the wave origin.
+  rpc SendEcho(EchoMessage) returns (EchoAck);
+  // The winner's verdict, relayed outward by every node that hears it.
+  rpc AnnounceCoordinator(CoordinatorAnnouncement) returns (CoordinatorAck);
+}
+
+message ElectionMessage {
+  int32 origin_id = 1;
+  int32 candidate_id = 2;
+  int32 candidate_jac = 3;
+  int64 message_id = 4;
+}
+
+message ElectionAck {}
+
+message EchoMessage {
+  int64 message_id = 1;
+  int32 from_worker_id = 2;
+  int32 best_candidate_id = 3;
+  int32 best_candidate_jac = 4;
+}
+
+message EchoAck {}
+
+message CoordinatorAnnouncement {
+  int32 coordinator_id = 1;
+  int64 message_id = 2;
+}
+
+message CoordinatorAck {}
