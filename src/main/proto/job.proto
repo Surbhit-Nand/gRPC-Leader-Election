@@ -79,6 +79,10 @@ message TaskAssignment {
   string job_type = 2;
   TaskPayload payload = 3;
   CoordinatorEndpoint coordinator = 4;
+  // Stable slice identity within a job; retries keep this ID.
+  int32 task_id = 5;
+  // Incremented on reassignment; echoed in TaskResult to fence stale owners.
+  int32 attempt = 6;
 }
 
 message TaskAck {}
@@ -86,6 +90,8 @@ message TaskAck {}
 message TaskResult {
   int32 job_id = 1;
   int32 worker_id = 2;
+  int32 task_id = 6;
+  int32 attempt = 7;
   oneof result {
     int32 int_result = 3;
     int64 long_result = 4;

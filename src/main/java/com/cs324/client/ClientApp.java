@@ -17,7 +17,6 @@ import java.rmi.registry.Registry;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -104,11 +103,9 @@ public class ClientApp extends JFrame {
             return column == 6;
         }
     };
-    private final JTextArea clusterFeed = new JTextArea();
+    private final SystemLogPane clusterFeed = new SystemLogPane();
     private final JCheckBox autoScroll = new JCheckBox("Auto-scroll", true);
     private final JLabel clusterStatusLabel = new JLabel("Connecting to cluster...");
-    private final ArrayDeque<String> clusterFeedLines = new ArrayDeque<>();
-    private static final int CLUSTER_FEED_MAX_LINES = 100;
     private static final int CLUSTER_POLL_MS = 2000;
     private ClusterMonitor.ClusterSnapshot lastClusterSnapshot;
     private final Object clusterLock = new Object();
@@ -498,19 +495,36 @@ public class ClientApp extends JFrame {
         autoScroll.setOpaque(false);
         autoScroll.setFont(BODY.deriveFont(11f));
         autoScroll.setForeground(MUTED);
-        logHeader.add(autoScroll, BorderLayout.EAST);
+        JPanel logControls = transparentPanel(new FlowLayout(FlowLayout.RIGHT, 12, 0));
+        for (SystemLogPane.Level level : SystemLogPane.Level.values()) {
+            JLabel key = new JLabel("● " + switch(level) {
+                case SUCCESS -> "Success"; case INFO -> "Info";
+                case WARNING -> "Recovery / election"; case ERROR -> "Failure";
+            });
+            key.setForeground(level.color);
+            key.setFont(BODY.deriveFont(10f));
+            logControls.add(key);
+        }
+        logControls.add(autoScroll);
+        JButton clearLog = button("Clear log", "trash", false);
+        clearLog.setToolTipText("Clear displayed log messages. New events will continue to appear.");
+        clearLog.addActionListener(event -> clusterFeed.clearLog());
+        logControls.add(clearLog);
+        logHeader.add(logControls, BorderLayout.EAST);
         log.add(logHeader, BorderLayout.NORTH);
         log.add(feedPane, BorderLayout.CENTER);
         cluster.add(clusterFooter, BorderLayout.SOUTH);
         // Both panels remain independently scrollable; the divider can be resized.
-        JSplitPane activity = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, cluster, log);
+        JSplitPane activity = new JSplitPane(JSplitPane.VERTICAL_SPLIT, cluster, log);
         activity.setBorder(BorderFactory.createEmptyBorder());
         activity.setOpaque(false);
         activity.setDividerSize(8);
-        activity.setResizeWeight(0.62);
-        cluster.setMinimumSize(new Dimension(520, 210));
-        log.setMinimumSize(new Dimension(260, 210));
-        log.setPreferredSize(new Dimension(390, 210));
+        activity.setResizeWeight(0.5);
+        activity.setDividerLocation(225);
+        activity.setPreferredSize(new Dimension(900, 430));
+        cluster.setMinimumSize(new Dimension(300, 170));
+        log.setMinimumSize(new Dimension(300, 140));
+        log.setPreferredSize(new Dimension(900, 195));
         JPanel activityRow = transparentPanel(new BorderLayout());
         activityRow.add(activity, BorderLayout.CENTER);
         return activityRow;
@@ -572,17 +586,7 @@ public class ClientApp extends JFrame {
         }
         DateTimeFormatter clock =
                 DateTimeFormatter.ofPattern("HH:mm:ss");
-        for (ClusterMonitor.ClusterEvent event : events) {
-            clusterFeedLines.addLast("[" + clock.format(event.time()
-                    .atZone(ZoneId.systemDefault())) + "] " + event.text());
-        }
-        while (clusterFeedLines.size() > CLUSTER_FEED_MAX_LINES) {
-            clusterFeedLines.removeFirst();
-        }
-        int previousCaret = clusterFeed.getCaretPosition();
-        clusterFeed.setText(String.join("\n", clusterFeedLines));
-        clusterFeed.setCaretPosition(autoScroll.isSelected() ? clusterFeed.getDocument().getLength()
-                : Math.min(previousCaret, clusterFeed.getDocument().getLength()));
+        clusterFeed.appendEvents(events, autoScroll.isSelected());
         int workers = snapshot.rows().size();
         String coordinator = snapshot.consensusCoordinator() == -1
                 ? "no coordinator yet" : "coordinator Worker " + snapshot.consensusCoordinator();
@@ -950,6 +954,8 @@ public class ClientApp extends JFrame {
         jobModel.setValueAt("Failed", row, 3);
         jobModel.setValueAt(message, row, 4);
         statusLabel.setText("Job " + jobId + " failed: " + message);
+        clusterFeed.appendEvents(List.of(new ClusterMonitor.ClusterEvent(java.time.Instant.now(),
+                "Job " + jobId + " submission failed: " + message + " [" + jobModel.getValueAt(row, 1) + "]")), autoScroll.isSelected());
     }
 
     // Updates the matching row once the coordinator returns the aggregated result.

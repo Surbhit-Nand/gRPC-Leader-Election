@@ -136,10 +136,10 @@ class GrpcJobDistributionTest {
                 () -> client.submitJob(first.toBuilder().setPayload(ComputationCodec.encode(new int[]{5})).build()));
         assertEquals(Status.Code.ALREADY_EXISTS, error.getStatus().getCode());
     }
-    @Test void stoppedWorkerReturnsAnExplicitJobError() throws Exception {
+    @Test void stoppedWorkerIsReassigned() throws Exception {
         servers.get(3).shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
         Object result = run(request("MAX", new int[]{1,2,3}));
-        assertInstanceOf(String.class, result); assertTrue(result.toString().contains("assignment failed"));
+        assertEquals(3, result);
     }
     @Test void endpointPublicationRequiresRegisteredIdentity() {
         var address = discovery.worker(1);
