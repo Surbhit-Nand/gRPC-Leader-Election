@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -36,7 +37,7 @@ import java.util.function.Consumer;
  * <p>One channel per peer is cached, as in the election transport, and every call carries a
  * deadline so a silent peer can never block the coordinator's own thread.
  */
-public final class CheckpointReplicator implements AutoCloseable {
+public final class CheckpointReplicator implements CheckpointSource, AutoCloseable {
 
     private record Peer(String host, int port, ManagedChannel channel) {}
 
@@ -57,10 +58,16 @@ public final class CheckpointReplicator implements AutoCloseable {
     /**
      * Puts one entry on every ready peer.
      *
-     * @param waitForAck true for acceptance, where the caller needs the entry to have landed
-     *                   on at least one peer before it acknowledges the client.
-     * @return true when at least one peer stored the entry, or when no peer was reachable and
-     *         the caller chose to carry on anyway.
+     * <p>Every peer is always asked: a replica that missed the acceptance could never fold a
+     * later delta (a delta carries no input), so a partial push would silently remove that peer
+     * from the set of workers that can take over this job.
+     *
+     * <p>{@code waitForAck} is used for acceptance, where the client's acknowledgement depends
+     * on the entry having landed somewhere. It waits for the <em>first</em> acknowledgement up to
+     * a deadline rather than for all of them, so one slow peer cannot hold up a submission; the
+     * remaining peers are still being written to in the background.
+     *
+     * @return true when the entry was accepted for replication, or when no peer was reachable.
      */
     public boolean replicate(List<CheckpointEntry> entries, long term, boolean waitForAck) {
         if (entries.isEmpty() || closed.get()) {
@@ -72,31 +79,31 @@ public final class CheckpointReplicator implements AutoCloseable {
                     + "; continuing without replication");
             return true;
         }
+        CountDownLatch acknowledged = new CountDownLatch(1);
+        for (WorkerEndpoint target : targets) {
+            executor.execute(() -> {
+                if (send(target, entries, term)) {
+                    acknowledged.countDown();
+                }
+            });
+        }
         if (!waitForAck) {
-            for (WorkerEndpoint target : targets) {
-                executor.execute(() -> send(target, entries, term));
-            }
             return true;
         }
-        // Bounded wait: one peer's answer is enough, and a late peer will catch up on the
-        // deltas that follow.
-        long deadline = System.currentTimeMillis() + Constants.FAILOVER_REPLICATION_DEADLINE_MS;
-        for (WorkerEndpoint target : targets) {
-            long remaining = deadline - System.currentTimeMillis();
-            if (remaining <= 0) {
-                break;
+        try {
+            if (!acknowledged.await(Constants.FAILOVER_REPLICATION_DEADLINE_MS, TimeUnit.MILLISECONDS)) {
+                log.accept("could not confirm checkpoint " + entries.get(0).getJobId()
+                        + " on a peer before the deadline; continuing unconfirmed");
             }
-            if (send(target, entries, term, remaining)) {
-                return true;
-            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
-        log.accept("could not replicate checkpoint before the deadline; continuing unconfirmed");
         return true;
     }
 
     /** Asynchronous single-peer push; failures are logged and dropped on purpose. */
-    private void send(WorkerEndpoint target, List<CheckpointEntry> entries, long term) {
-        send(target, entries, term, Constants.FAILOVER_REPLICATION_RPC_DEADLINE_MS);
+    private boolean send(WorkerEndpoint target, List<CheckpointEntry> entries, long term) {
+        return send(target, entries, term, Constants.FAILOVER_REPLICATION_RPC_DEADLINE_MS);
     }
 
     private boolean send(WorkerEndpoint target, List<CheckpointEntry> entries, long term, long timeoutMillis) {
@@ -128,6 +135,14 @@ public final class CheckpointReplicator implements AutoCloseable {
      * Reads one peer's log. Called during takeover for every reachable worker; a peer that
      * cannot answer is simply one fewer source, never a failed takeover.
      */
+    @Override
+    /**
+     * Reads one peer's log. Called during takeover for every reachable worker; a peer that
+     * cannot answer is one fewer source, never a failed takeover - and it is also how the
+     * takeover learns that the peer is gone.
+     *
+     * @return the peer's entries, or null when the peer did not answer.
+     */
     public FetchReply fetch(WorkerEndpoint target) {
         try {
             FetchReply reply = FailoverServiceGrpc.newBlockingStub(channelFor(target))
@@ -138,16 +153,17 @@ public final class CheckpointReplicator implements AutoCloseable {
             return reply;
         } catch (StatusRuntimeException e) {
             forget(target.getWorkerId(), e);
-            log.accept("fetch from Worker " + target.getWorkerId() + " failed ("
-                    + e.getStatus().getCode() + "): " + e.getMessage());
-            return FetchReply.getDefaultInstance();
+            log.accept("Worker " + target.getWorkerId() + " did not answer the checkpoint fetch ("
+                    + e.getStatus().getCode() + "), treating it as gone: " + e.getMessage());
+            return null;
         } catch (RuntimeException e) {
-            log.accept("fetch from Worker " + target.getWorkerId() + " could not be started: " + e.getMessage());
-            return FetchReply.getDefaultInstance();
+            log.accept("Worker " + target.getWorkerId() + " could not be asked for its checkpoints,"
+                    + " treating it as gone: " + e.getMessage());
+            return null;
         }
     }
 
-    /** Every registered worker with a published gRPC endpoint, this one excluded. */
+    @Override
     public List<WorkerEndpoint> readyPeers() {
         List<WorkerEndpoint> ready = new ArrayList<>();
         try {

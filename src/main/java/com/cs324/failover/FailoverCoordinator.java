@@ -45,7 +45,7 @@ public final class FailoverCoordinator {
 
     private final int selfId;
     private final CheckpointLog log;
-    private final CheckpointReplicator replicator;
+    private final CheckpointSource peers;
     private final JobRestorer restorer;
     private final ResultDeliverer deliverer;
     private final LongSupplier currentTerm;
@@ -54,12 +54,12 @@ public final class FailoverCoordinator {
     // One takeover per job and term, so repeated triggers cannot rebuild a job twice.
     private final Set<String> takenOver = new HashSet<>();
 
-    public FailoverCoordinator(int selfId, CheckpointLog log, CheckpointReplicator replicator,
+    public FailoverCoordinator(int selfId, CheckpointLog log, CheckpointSource peers,
             JobRestorer restorer, ResultDeliverer deliverer, LongSupplier currentTerm,
             long jobTimeoutMillis, Consumer<String> events) {
         this.selfId = selfId;
         this.log = log;
-        this.replicator = replicator;
+        this.peers = peers;
         this.restorer = restorer;
         this.deliverer = deliverer;
         this.currentTerm = currentTerm;
@@ -75,31 +75,41 @@ public final class FailoverCoordinator {
     public int takeOver() {
         long term = Math.max(currentTerm.getAsLong(), 1L);
         events.accept(WorkerEvent.FAILOVER_STARTED + ": merging replicated job state at term " + term);
-        int merged = merge();
+        Set<Integer> live = merge();
         int recovered = 0;
         for (int jobId : log.jobIds()) {
-            if (rebuild(jobId, term)) {
+            if (rebuild(jobId, term, live)) {
                 recovered++;
             }
         }
-        events.accept(WorkerEvent.FAILOVER_COMPLETED + ": merged " + merged + " checkpoint source(s), recovered "
+        events.accept(WorkerEvent.FAILOVER_COMPLETED + ": merged " + live.size() + " answering peer(s), recovered "
                 + recovered + " job(s) at term " + term);
         return recovered;
     }
 
-    /** Reads every peer's replica into the local log; sequence and term rules do the merging. */
-    private int merge() {
-        int merged = 0;
-        for (WorkerEndpoint peer : replicator.readyPeers()) {
-            FetchReply reply = replicator.fetch(peer);
+    /**
+     * Reads every peer's replica into the local log, and learns which peers are alive on the way.
+     *
+     * <p>A crashed worker is still registered, so "listed in the directory" is not evidence that
+     * it exists. A peer that does not answer the fetch is treated as gone, which is the same
+     * signal the heartbeat produced and the same answer the decisions below need.
+     *
+     * @return the ids of the peers that answered.
+     */
+    private Set<Integer> merge() {
+        Set<Integer> live = new HashSet<>();
+        for (WorkerEndpoint peer : peers.readyPeers()) {
+            FetchReply reply = peers.fetch(peer);
+            if (reply == null) {
+                events.accept("Worker " + peer.getWorkerId() + " did not answer; treating it as gone");
+                continue;
+            }
+            live.add(peer.getWorkerId());
             for (CheckpointEntry entry : reply.getEntriesList()) {
                 log.apply(entry);
             }
-            if (!reply.getEntriesList().isEmpty()) {
-                merged++;
-            }
         }
-        return merged;
+        return live;
     }
 
     /**
@@ -107,7 +117,7 @@ public final class FailoverCoordinator {
      *
      * @return true when the job was rebuilt here.
      */
-    private boolean rebuild(int jobId, long term) {
+    private boolean rebuild(int jobId, long term, Set<Integer> live) {
         JobCheckpoint job = log.job(jobId);
         if (job == null) {
             return false;
@@ -129,7 +139,14 @@ public final class FailoverCoordinator {
             return false;
         }
 
-        List<WorkerEndpoint> live = replicator.readyPeers();
+        // The job is only ours to take if the coordinator that accepted it is gone. A rotation
+        // leaves the previous coordinator alive and still finishing its work; stealing that job
+        // would run it twice and, for a sum, count it twice.
+        int owner = job.acceptedBy();
+        if (owner != selfId && owner != -1 && live.contains(owner)) {
+            return false;
+        }
+
         List<RestoredJob.RestoredSlice> slices = new ArrayList<>(job.slices().size());
         for (JobCheckpoint.Slice slice : job.slices()) {
             slices.add(restoreSlice(slice, live));
@@ -150,14 +167,13 @@ public final class FailoverCoordinator {
      * to the new coordinator with a higher attempt: the previous owner cannot answer, so the
      * slice is recomputed under a fresh attempt, which also fences any late answer from it.
      */
-    private RestoredJob.RestoredSlice restoreSlice(JobCheckpoint.Slice slice, List<WorkerEndpoint> live) {
+    private RestoredJob.RestoredSlice restoreSlice(JobCheckpoint.Slice slice, Set<Integer> live) {
         if (slice.completed()) {
             return new RestoredJob.RestoredSlice(slice.taskId(), slice.input(), slice.owner(),
                     slice.attempt(), slice.result());
         }
         int ownerId = slice.owner() == null ? 0 : slice.owner().getWorkerId();
-        boolean ownerAlive = live.stream().anyMatch(peer -> peer.getWorkerId() == ownerId);
-        if (ownerAlive) {
+        if (live.contains(ownerId)) {
             return new RestoredJob.RestoredSlice(slice.taskId(), slice.input(), slice.owner(),
                     slice.attempt(), null);
         }

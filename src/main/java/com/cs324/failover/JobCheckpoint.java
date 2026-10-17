@@ -40,6 +40,10 @@ public final class JobCheckpoint {
     private final Map<Integer, Slice> slices = new LinkedHashMap<>();
     private long sequence;
     private long term;
+    // The coordinator that accepted this job. Job ownership is not leadership: after an
+    // ordinary rotation the previous coordinator is alive and still finishing its jobs, and
+    // only its death makes the job another worker's problem.
+    private int acceptedBy = -1;
     private TaskResult finalResult;
     private boolean delivered;
 
@@ -54,6 +58,15 @@ public final class JobCheckpoint {
         this.acceptedAtMillis = acceptedAtMillis;
         this.sequence = sequence;
         this.term = term;
+    }
+
+    /** Worker id of the coordinator that accepted the job, or -1 when unknown. */
+    public int acceptedBy() {
+        return acceptedBy;
+    }
+
+    void acceptedBy(int coordinatorId) {
+        this.acceptedBy = coordinatorId;
     }
 
     public SubmitJobRequest request() {

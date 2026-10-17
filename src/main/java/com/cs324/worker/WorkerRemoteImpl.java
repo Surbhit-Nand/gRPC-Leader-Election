@@ -55,6 +55,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemote, ElectionHandler, FailoverHandler {
     private final com.cs324.progress.ProgressService progress = new com.cs324.progress.ProgressService();
     private io.grpc.Server progressServer;
+    private volatile int grpcPort = -1;
     private com.cs324.computation.RegistryClient grpcDirectory;
     private com.cs324.computation.GrpcJobService grpcJobs;
     private String grpcHost = "localhost";
@@ -91,10 +92,11 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
                         if (grpcDirectory == null) throw new IllegalStateException("gRPC discovery is not configured");
                         return grpcDirectory.workers();
                     }, jobId -> {
-                        if (currentCoordinatorId != id || handoverInProgress.get()) return false;
                         // Refuse while a takeover is rebuilding jobs, or the same work could be
                         // accepted fresh here and resumed from the log a moment later.
-                        if (failoverInProgress.get()) return false;
+                        if (currentCoordinatorId != id || handoverInProgress.get() || failoverInProgress.get()) {
+                            return false;
+                        }
                         try { reserveTermSlot(jobId); return true; }
                         catch (RemoteException e) { return false; }
                     }, workerId -> {
@@ -104,6 +106,9 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
             progressServer = io.grpc.ServerBuilder.forPort(0).addService(progress).addService(grpcJobs)
                     .addService(new ElectionGrpcService(this))
                     .addService(new FailoverGrpcService(this, id)).build().start();
+            // Remember the port: gRPC refuses getPort() once the server is down, and this is
+            // read by every dispatch and probe, including ones racing a shutdown.
+            grpcPort = progressServer.getPort();
         }
     }
 
@@ -190,7 +195,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     }
 
     @Override
-    public synchronized int getProgressPort() { return progressServer == null ? -1 : progressServer.getPort(); }
+    public synchronized int getProgressPort() { return grpcPort; }
 
     // One election wave, plus the bookkeeping needed to complete it.
     private static class ElectionState {

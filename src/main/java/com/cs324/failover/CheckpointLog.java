@@ -83,6 +83,7 @@ public final class CheckpointLog {
             job = new JobCheckpoint(accepted.getRequest(), accepted.getAcceptedAtMillis(),
                     entry.getSequence(), entry.getTerm());
             job.adoptInitialSlices(accepted.getSlicesList());
+            job.acceptedBy(entry.getCoordinatorId());
             jobs.put(jobId, job);
         } else {
             switch (entry.getEntryCase()) {
@@ -182,6 +183,10 @@ public final class CheckpointLog {
     /**
      * This replica's view of one job as entries a peer can fold: at most one accepted entry
      * carrying the current slice table, plus a tombstone when the job already ended.
+     *
+     * <p>Both entries carry the coordinator that <em>accepted</em> the job, not the replica
+     * serving them. A survivor decides whether to rebuild a job from that id, so a snapshot
+     * that renamed the owner would make every job look abandoned.
      */
     public List<CheckpointEntry> snapshot(int jobId) {
         JobCheckpoint job = jobs.get(jobId);
@@ -193,7 +198,7 @@ public final class CheckpointLog {
                 .setJobId(jobId)
                 .setSequence(job.sequence())
                 .setTerm(job.term())
-                .setCoordinatorId(replicaId)
+                .setCoordinatorId(job.acceptedBy())
                 .setAccepted(JobAccepted.newBuilder()
                         .setRequest(job.request())
                         .setAcceptedAtMillis(job.acceptedAtMillis())
@@ -204,7 +209,7 @@ public final class CheckpointLog {
                     .setJobId(jobId)
                     .setSequence(job.sequence() + 1)
                     .setTerm(job.term())
-                    .setCoordinatorId(replicaId)
+                    .setCoordinatorId(job.acceptedBy())
                     .setFinished(JobFinished.newBuilder()
                             .setResult(job.finalResult())
                             .setDelivered(job.delivered()))
