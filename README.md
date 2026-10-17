@@ -1,11 +1,21 @@
 # CS324 Assignment 2 (2026) - Distributed Worker Cluster
 
 The system supports MAX, PRIMESUM and PRIMECOUNT with gRPC job submission,
-distribution, results, streamed progress and **worker failure recovery**.
+distribution, results, streamed progress, **worker failure recovery**, a
+**gRPC leader election** and **coordinator failover**.
 See [Worker failure recovery](#worker-failure-recovery) below and
 [Job distribution](docs/job-distribution.md) for integration and demo instructions.
-Elections, peer links and cluster monitoring still use RMI; the full Assignment 2
-transport migration and coordinator state recovery are not yet complete.
+Peer links and cluster monitoring still use RMI; the full Assignment 2
+transport migration is not yet complete.
+
+Two features from the election member:
+
+- **Leader election runs over gRPC** (`ElectionService`). See
+  [docs/election.md](docs/election.md) and the
+  [election and failover demo](#election-and-failover-demo-member-2).
+- **Coordinator failover**: if the coordinator dies, the survivors detect it,
+  elect a replacement and finish the jobs it was holding. See
+  [docs/failover.md](docs/failover.md).
 
 ## Prerequisites
 
@@ -409,10 +419,89 @@ changes; restart the client after GUI changes.
 A timeout indicates a suspected failure: network delays can cause duplicate
 execution, but attempt checks prevent duplicate aggregation. The overall job
 deadline remains ten minutes and recovery does not extend it. Recovery state is
-in memory; original-coordinator crashes and durable final-client result replay
-are not handled by this feature. Electing a replacement coordinator does not yet
-restore the old coordinator's active jobs. Full migration of elections, peer
-links and monitoring from RMI to gRPC also remains outstanding.
+in memory. Replacing a coordinator that dies mid-job is now handled separately:
+see [coordinator failover](docs/failover.md). Full migration of peer links and
+monitoring from RMI to gRPC also remains outstanding.
 
 See [recovery rationale and demonstration](docs/job-distribution.md#recovery-rationale-and-demonstration)
 for the design tradeoffs and detailed procedure.
+
+---
+
+## Election and failover demo (Member 2)
+
+Two things are demonstrated here: the election running over gRPC, and the
+cluster surviving the death of its coordinator. Both need the gRPC listener, so
+every worker is started with `grpc`.
+
+Rebuild first, and restart every node together - a running JVM does not pick up
+new services from a recompile:
+
+```powershell
+.\run.ps1 build
+.\run.ps1 bootstrap
+.\run.ps1 worker localhost 1099 grpc
+.\run.ps1 worker localhost 1099 grpc
+.\run.ps1 worker localhost 1099 grpc
+.\run.ps1 worker localhost 1099 grpc
+.\run.ps1 client localhost 1099 1199
+```
+
+Wait for each worker's `gRPC jobs and progress on port ...` line before starting
+the next one. After about three seconds the cluster elects a coordinator by
+itself; the client's **Cluster activity** card shows one Coordinator row. To
+force another election at any time, press `[1]` in a worker's terminal - the
+wave now travels over `ElectionService.SendElection`, `SendEcho` and
+`AnnounceCoordinator`.
+
+### Killing the coordinator mid-job
+
+1. In the client, submit a **long** `PRIMESUM` range, for example `1,60000000`.
+   A short job finishes before the cluster can notice anything, so the
+   demonstration needs one that is still running in a few seconds.
+2. While its progress breakdown still shows Processing rows, **close the
+   coordinator's terminal window** (or Ctrl+C it). A closed window is a crash:
+   the worker does not deregister, so the directory still lists it.
+3. In the client's **System log**, within roughly three to five seconds:
+
+   ```text
+   COORDINATOR_FAILED   Worker 2 failed after 3 missed probes; electing a replacement
+   FAILOVER_STARTED     coordinator Worker 2 declared failed; starting an election in 210ms
+   FAILOVER_STARTED     merging replicated job state at term 2
+   JOB_RECOVERED        Job 1 (PRIMESUM) resumed at term 2 with 4 unfinished slice(s)
+   FAILOVER_COMPLETED   merged 2 answering peer(s), recovered 1 job(s) at term 2
+   ```
+
+4. The cluster activity card shows a different Coordinator row, and the job's
+   progress rows transfer to the new coordinator.
+5. The answer arrives **once**, and it is the same answer the same input
+   produces without any failure. Compare it against a second run of the same
+   input while nothing is being killed.
+6. Repeat by killing the new coordinator. Kill one once with a clean exit (the
+   `Leaving` option, or Ctrl+C) to see the graceful path: survivors are handed
+   the leaver's neighbour set, and the same failover follows.
+
+### What to check after the kill
+
+- The client still receives exactly one result for that job. The answer must be
+  correct: a slice that was recomputed and also counted from its old owner would
+  silently produce a wrong sum, which is the failure mode worth demonstrating.
+- `JOB_RECOVERED` names the job that came back. A job whose owner is still alive
+  is deliberately left alone, so a normal five-job rotation never steals one.
+- Nothing else needs to be restarted. No manual step, no re-submission.
+
+### Automated version
+
+```powershell
+mvn '-Dtest=CoordinatorFailoverTest,GrpcElectionTest' test
+```
+
+`CoordinatorFailoverTest` does exactly the above over real TCP: four workers, a
+job with every slice dispatched, then the coordinator's server dropped. It
+asserts a replacement is elected within a bound, the job finishes with the exact
+independently computed sum, the client is called back once and progress reaches
+100% on the new coordinator. `GrpcElectionTest` covers the election itself and
+stops the RMI registry first, so its convergence can only have come over gRPC.
+
+Design, constants and known gaps: [docs/failover.md](docs/failover.md),
+[docs/election.md](docs/election.md).
