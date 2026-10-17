@@ -15,6 +15,10 @@ public class Constants {
     // How often a worker probes the coordinator it currently believes in.
     public static final int HEARTBEAT_INTERVAL_MS = 2000;
 
+    // Deadline for one election hop over gRPC. It bounds a single forward, not the whole
+    // election: a wave crosses several hops, so this only has to exceed one local round trip.
+    public static final int ELECTION_RPC_DEADLINE_MS = 1500;
+
     // Settle time after startup, so an already-formed cluster never holds a pointless election.
     public static final int STARTUP_ELECTION_DELAY_MS = 3000;
 
