@@ -1,9 +1,11 @@
 # CS324 Assignment 2 (2026) - Distributed Worker Cluster
 
-The gRPC computation feature and integration instructions are in
-[Job distribution](docs/job-distribution.md). The GUI now uses the shared gRPC
-contracts for job submission, distribution, results and progress. Elections,
-peer links and cluster monitoring still use RMI.
+The system supports MAX, PRIMESUM and PRIMECOUNT with gRPC job submission,
+distribution, results, streamed progress and **worker failure recovery**.
+See [Worker failure recovery](#worker-failure-recovery) below and
+[Job distribution](docs/job-distribution.md) for integration and demo instructions.
+Elections, peer links and cluster monitoring still use RMI; the full Assignment 2
+transport migration and coordinator state recovery are not yet complete.
 
 ## Prerequisites
 
@@ -152,7 +154,7 @@ mvn exec:exec -Dexec.executable=java -Dexec.args="-classpath %classpath com.cs32
 mvn test
 ```
 
-171 JUnit 5 tests cover the election protocol, duplicate-message handling, job splitting and aggregation, client callbacks, coordinator rotation, thread safety, auto-assigned worker ids, partition-healing rewire, the cluster-activity monitor, range warnings, gRPC contract shapes, Bootstrap discovery over gRPC, and job progress streaming.
+178 JUnit 5 tests cover the election protocol, duplicate-message handling, job splitting and aggregation, client callbacks, coordinator rotation, thread safety, auto-assigned worker ids, partition-healing rewire, the cluster-activity monitor, range warnings, gRPC contract shapes, Bootstrap discovery over gRPC, job progress streaming, worker failure recovery, stale-result protection, concurrent-job recovery, and colored system-log rendering.
 
 ---
 
@@ -161,13 +163,13 @@ mvn test
 These are settled interpretations of ambiguous spec points. Keep implementations consistent with these across all worker/election/job-dispatch code.
 
 - **JAC increments per worker assignment, not per client job.** Per the spec: _"The counter is incremented each time that worker, while acting as coordinator, assigns a job to another worker."_ Taken literally, if a single client job is split across 3 other workers, the coordinator's JAC increases by 3 in that one request — not by 1. The JAC's only role is therefore to rank candidates during an election (lowest wins, highest ID breaks ties).
-- **The JAC is charged when the assignment is issued, and is not refunded.** A failed RMI hand-off still counts: the coordinator incremented when it decided to assign the share, not when the share arrived. A worker that dies or is unreachable mid-dispatch therefore leaves the JAC slightly higher than the work it actually shed, and it is deliberately not corrected. Undoing the increment would need a rollback path that races other in-flight assignments, and a JAC that is briefly pessimistic is harmless here because it only ranks election candidates. A dead participant's share is still computed locally by the coordinator, so the client's result stays correct regardless of the counter.
+- **The JAC is charged when the assignment is issued, and is not refunded.** A failed assignment still counts: the coordinator incremented when it decided to assign the share, not when the share arrived. A worker that dies or is unreachable mid-dispatch therefore leaves the JAC slightly higher than the work it actually shed, and it is deliberately not corrected. Undoing the increment would need a rollback path that races other in-flight assignments, and a JAC that is briefly pessimistic is harmless here because it only ranks election candidates. In the gRPC job path, a failed participant's unfinished slice is reassigned to another worker, with local computation as a fallback. Liveness probes do not increment JAC; a new remote assignment does.
 - **A term lasts 5 client jobs, counted per job rather than per assignment.** The job budget is tracked separately from the JAC, so a term's length does not depend on how many workers happen to be active: the coordinator accepts five client jobs, then starts a new election and yields. Counting assignments instead would have ended a term after two jobs on a four-worker cluster, which does not match the "five jobs per term" rule. The counter resets whenever a node becomes the coordinator in a newly concluded election, so each term gets a full budget. Only a concluded election starts a new term: a joining worker adopts the coordinator it is told about locally and does not re-announce it, and the node that wins an election records its announcement before broadcasting, so a repeated or adopted announcement cannot hand a serving coordinator a second budget mid-term.
 - **The fifth job of a term triggers the handover, not the job's completion.** The budget is spent when a job is accepted, so rotation is driven from `submitJob`; waiting for the fifth job to finish would let further jobs slip into a term that was already full. A term that is full also refuses further jobs with a retryable error instead of queueing them, so "at most five jobs" holds under concurrent submissions, and the refusal is safe for clients because the job id is released and the client retries against the new coordinator. The refusal covers the handover itself: the budget is reset the moment the term ends, but the yielding node is still named coordinator until the election concludes, so it refuses work for that whole window rather than starting a fresh budget inside a term the spec has already spent.
 - **The cluster elects a coordinator on its own.** Workers wait a short grace period after registering and start an election only if they still know no coordinator, and a joining worker adopts the leader its peer already knows. No manual step is needed before the first job, and a normal startup converges to a single coordinator.
 - **The coordinator participates in every job's computation.** It does not only delegate — it takes its own share of the workload (its own sub-range/sub-list) alongside the workers it assigns tasks to.
 - **Coordinator failure detection uses heartbeats.** Workers periodically ping the current coordinator; a missed response is what triggers a new election. This is separate from the election-termination mechanism (echo-based, see election design notes).
-- **Fault tolerance is out of scope for this assignment.** No requirement to handle a worker or coordinator dying mid-job or mid-election — that's Assignment 2's focus.
+- **Worker failure recovery is implemented for gRPC jobs.** Unfinished slices are reassigned and stale attempts cannot alter the result. Coordinator election alone does not recover active job state: coordinator crash recovery remains unfinished Assignment 2 work.
 - **Neighbour connections are bidirectional.** When worker A connects to worker B (via a peer the Bootstrap Node introduced), both A and B add each other to their local neighbour lists — a successful RMI call is treated as the acknowledgement, no separate ack message needed.
 - **A departing worker never splits the cluster.** Survivors keep a 2-hop view (each neighbour's neighbour set, seeded on connect and refreshed on traffic). On a clean exit the leaver hands its neighbour set over via `notifyLeaving` before deregistering; on a crash the first failed send to the corpse triggers the same path: prune the dead edge and chain to the smallest-id grandparent, falling back to any live Bootstrap peer. One edge per orphan, deterministic pick, so no islands and no cliques.
 
@@ -238,6 +240,20 @@ snapshot heuristic stays silent whenever the exact worker event already tells
 that story. Kill a middle worker and watch the exact `dropped … (unreachable)`
 + `chained to …` lines appear, and submit a job to see each slice dispatched and
 received per worker.
+
+The worker table sits above the **System log**. Messages include job/task IDs,
+worker identities and trailing job-type tags such as `[MAX]` or `[PRIMESUM]`.
+The log distinguishes events by color:
+
+- **Green:** worker joins/registration, successful task and job completion.
+- **Blue:** normal information, gRPC submissions and slice distribution.
+- **Orange:** elections, reassignment and recovery in progress.
+- **Red:** worker/coordinator failure, disconnection and errors.
+
+**Auto-scroll** follows new events; **Clear log** clears this client's displayed
+and retained messages while allowing new events to appear. It does not cancel
+jobs or reset worker event cursors. Coordinator-state-recovered messages are not
+emitted because coordinator state recovery is not implemented.
 
 ## Computation
 
@@ -339,4 +355,64 @@ and service classes during `compile`; reload the Maven project in your IDE.
 The coordinator retains the latest 256 completed job snapshots, allowing very fast
 jobs to display progress even when they finish before the client subscribes.
 
-Job submission, worker task delivery, results and progress now use gRPC through the shared contracts. Elections, neighbour links and cluster monitoring still use RMI. Progress updates occur at share completion. Interrupted streams do not yet reconnect automatically. Worker reassignment and coordinator state recovery remain separate work; see [distribution integration](docs/job-distribution.md) for the current failure behavior.
+Job submission, worker task delivery, results and progress now use gRPC through the shared contracts. Elections, neighbour links and cluster monitoring still use RMI. Progress updates occur at share completion. Interrupted streams do not yet reconnect automatically. Worker reassignment is implemented: unfinished units move to the replacement worker without double-counting completed work. Coordinator state recovery remains unfinished; see [distribution integration](docs/job-distribution.md) for details.
+
+## Worker failure recovery
+
+If a non-coordinator worker closes, crashes or stops responding during an active
+job, the original job coordinator recovers its unfinished slices:
+
+1. Every unfinished remote slice is probed using its idempotent gRPC
+   `AssignTask` call every 500 ms, with a one-second RPC deadline. Workers
+   acknowledge independently of calculation completion, so slow calculations
+   alone do not trigger recovery.
+2. On failure, the coordinator increments the slice's attempt number and refreshes
+   membership through gRPC discovery. It selects another available remote worker,
+   preferring one with fewer outstanding slices for that job. Newly joined workers
+   with published gRPC endpoints are eligible. If no remote candidate is available,
+   or discovery fails, the coordinator computes the slice locally.
+3. Results must match the job, task ID, current attempt and assigned worker.
+   Duplicate and delayed results are acknowledged without changing the calculation.
+   Repeated assignments reuse in-flight work or replay a cached result after a
+   lost callback, rather than repeating the same attempt's calculation.
+4. Actual completed work drives progress. The original coordinator combines each
+   slice once and returns the correct MAX, PRIMESUM or PRIMECOUNT result to the
+   original submitting client, even after a normal coordinator rotation.
+
+The GUI System log identifies the failed worker, reassignment destination and
+accepted task completion. Recovery probes, discovery, assignments and results
+use gRPC. The existing GUI cluster-monitor event feed still uses RMI.
+
+### Verify and demonstrate recovery
+
+Run the focused integration tests:
+
+```powershell
+mvn '-Dtest=GrpcWorkerRecoveryTest,GrpcJobDistributionTest' test
+```
+
+These cover stopped and unresponsive workers, joins during active jobs, duplicate
+and delayed results, concurrent jobs, local fallback, lost result callbacks and
+64-bit PRIMESUM range results.
+
+For a manual demo, rebuild and start bootstrap, at least three workers and a
+client using [How to Run](#how-to-run-any-ide-or-terminal). Submit a sufficiently
+long PRIMESUM range and close a non-coordinator worker while its task is still
+processing. Watch the reassignment and completion messages in System log, inspect
+the worker-level progress breakdown, and compare the final result with a run of
+the same input without failure. Start another worker before the failure to make
+it eligible for reassignment. Rebuild and restart workers together after protocol
+changes; restart the client after GUI changes.
+
+### Limits and remaining Assignment 2 work
+
+A timeout indicates a suspected failure: network delays can cause duplicate
+execution, but attempt checks prevent duplicate aggregation. The overall job
+deadline remains ten minutes and recovery does not extend it. Recovery state is
+in memory; original-coordinator crashes and durable final-client result replay
+are not handled by this feature. Electing a replacement coordinator does not yet
+restore the old coordinator's active jobs. Full migration of elections, peer
+links and monitoring from RMI to gRPC also remains outstanding.
+
+See [recovery rationale and demonstration](docs/job-distribution.md#recovery-rationale-and-demonstration)
+for the design tradeoffs and detailed procedure.
