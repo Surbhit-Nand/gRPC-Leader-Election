@@ -25,6 +25,20 @@ public record WorkerEvent(long seq, int workerId, long epochMillis, String kind,
     public static final String WORKER_FAILED = "WORKER_FAILED";
     public static final String TASK_REASSIGNED = "TASK_REASSIGNED";
     public static final String TASK_COMPLETED = "TASK_COMPLETED";
+    // Coordinator answered late or not at all, but is still counted as active.
+    public static final String COORDINATOR_SUSPECTED = "COORDINATOR_SUSPECTED";
+    // Coordinator missed enough probes to be declared dead; this starts a failover.
+    public static final String COORDINATOR_FAILED = "COORDINATOR_FAILED";
+    // A surviving worker became coordinator and began merging the replicated job log.
+    public static final String FAILOVER_STARTED = "FAILOVER_STARTED";
+    // The merge finished; the recovered jobs are running again.
+    public static final String FAILOVER_COMPLETED = "FAILOVER_COMPLETED";
+    // One replicated job was rebuilt and resumed after a coordinator failure.
+    public static final String JOB_RECOVERED = "JOB_RECOVERED";
+    // A checkpoint entry was written to at least one peer.
+    public static final String CHECKPOINT_REPLICATED = "CHECKPOINT_REPLICATED";
+    // This worker saw a newer term and gave up leadership.
+    public static final String LEADERSHIP_STEP_DOWN = "LEADERSHIP_STEP_DOWN";
     // Clean exit: handed the neighbour set over before deregistering.
     public static final String LEAVING = "LEAVING";
 }
