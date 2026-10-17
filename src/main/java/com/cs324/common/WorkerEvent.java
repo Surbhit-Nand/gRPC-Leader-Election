@@ -39,6 +39,9 @@ public record WorkerEvent(long seq, int workerId, long epochMillis, String kind,
     public static final String CHECKPOINT_REPLICATED = "CHECKPOINT_REPLICATED";
     // This worker saw a newer term and gave up leadership.
     public static final String LEADERSHIP_STEP_DOWN = "LEADERSHIP_STEP_DOWN";
+    // A replication or election hop failed; the recovery continues without it.
+    public static final String FAILOVER_DETAIL = "FAILOVER_DETAIL";
+    public static final String ELECTION_TRANSPORT = "ELECTION_TRANSPORT";
     // Clean exit: handed the neighbour set over before deregistering.
     public static final String LEAVING = "LEAVING";
 }

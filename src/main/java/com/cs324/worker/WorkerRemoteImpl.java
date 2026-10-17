@@ -157,7 +157,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
 
     // Failover bookkeeping is operational detail; the feed keeps it, stdout stays clean.
     private void logFailover(String message) {
-        recordEvent("FAILOVER_DETAIL", message);
+        recordEvent(WorkerEvent.FAILOVER_DETAIL, message);
     }
 
     /** Switches election hops to gRPC. Idempotent, so a re-published endpoint is harmless. */
@@ -191,7 +191,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
 
     // Transport faults are already handled where they happen, so this only keeps the feed honest.
     private void logElectionTransport(String message) {
-        recordEvent("ELECTION_TRANSPORT", message);
+        recordEvent(WorkerEvent.ELECTION_TRANSPORT, message);
     }
 
     @Override

@@ -164,7 +164,7 @@ mvn exec:exec -Dexec.executable=java -Dexec.args="-classpath %classpath com.cs32
 mvn test
 ```
 
-178 JUnit 5 tests cover the election protocol, duplicate-message handling, job splitting and aggregation, client callbacks, coordinator rotation, thread safety, auto-assigned worker ids, partition-healing rewire, the cluster-activity monitor, range warnings, gRPC contract shapes, Bootstrap discovery over gRPC, job progress streaming, worker failure recovery, stale-result protection, concurrent-job recovery, and colored system-log rendering.
+216 JUnit 5 tests cover the election protocol over gRPC and over the RMI fallback, duplicate-message handling, job splitting and aggregation, client callbacks, coordinator rotation, thread safety, auto-assigned worker ids, partition-healing rewire, the cluster-activity monitor, range warnings, gRPC contract shapes, Bootstrap discovery over gRPC, job progress streaming, worker failure recovery, stale-result protection, concurrent-job recovery, colored system-log rendering, coordinator-failure detection, and coordinator failover with job recovery.
 
 ---
 
