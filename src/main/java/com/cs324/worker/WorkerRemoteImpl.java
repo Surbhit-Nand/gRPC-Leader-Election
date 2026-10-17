@@ -7,6 +7,14 @@ import com.cs324.common.Constants;
 import com.cs324.common.WorkerAddress;
 import com.cs324.common.WorkerEvent;
 import com.cs324.common.WorkerRemote;
+import com.cs324.election.ElectionGrpcService;
+import com.cs324.election.ElectionHandler;
+import com.cs324.election.ElectionTransport;
+import com.cs324.election.GrpcElectionTransport;
+import com.cs324.election.RmiElectionTransport;
+import com.cs324.election.proto.CoordinatorAnnouncement;
+import com.cs324.election.proto.EchoMessage;
+import com.cs324.election.proto.ElectionMessage;
 import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
@@ -31,14 +39,22 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemote {
+public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemote, ElectionHandler {
     private final com.cs324.progress.ProgressService progress = new com.cs324.progress.ProgressService();
     private io.grpc.Server progressServer;
     private com.cs324.computation.RegistryClient grpcDirectory;
     private com.cs324.computation.GrpcJobService grpcJobs;
     private String grpcHost = "localhost";
 
-    // Share one listener for computation and progress, preserving term limits and JAC accounting.
+    // Election hops use gRPC once this worker publishes an endpoint. The RMI hop stays as the
+    // fallback for a cluster that never publishes one, and keeps every legacy election test valid.
+    private volatile ElectionTransport electionTransport;
+
+    // Leadership generation. 0 means "no term seen yet"; the legacy RMI adapters never carry a
+    // term, so ordering only ever applies to announcements that came over gRPC.
+    private final AtomicLong currentTerm = new AtomicLong(0);
+
+    // Share one listener for computation, progress and election, preserving term limits and JAC accounting.
     public synchronized void startProgressServer() throws java.io.IOException {
         if (progressServer == null) {
             grpcJobs = new com.cs324.computation.GrpcJobService(id,
@@ -54,7 +70,8 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
                     }, workerId -> {
                         jobAllocationCounter.incrementAndGet();
                     }, this::maybeRotateCoordinator, executor, progress, java.time.Duration.ofMinutes(10), this::recordEvent);
-            progressServer = io.grpc.ServerBuilder.forPort(0).addService(progress).addService(grpcJobs).build().start();
+            progressServer = io.grpc.ServerBuilder.forPort(0).addService(progress).addService(grpcJobs)
+                    .addService(new ElectionGrpcService(this)).build().start();
         }
     }
 
@@ -63,7 +80,43 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
         grpcHost = host;
         grpcDirectory = new com.cs324.computation.RegistryClient(bootstrapHost, bootstrapGrpcPort);
         grpcDirectory.publish(id, host, rmiPort, getProgressPort());
+        // From here on the election wave travels over gRPC, resolved through the same directory.
+        useGrpcElectionTransport(grpcDirectory);
         System.out.println("Worker " + id + " gRPC jobs and progress on port " + getProgressPort());
+    }
+
+    /** Switches election hops to gRPC. Idempotent, so a re-published endpoint is harmless. */
+    private synchronized void useGrpcElectionTransport(com.cs324.computation.RegistryClient directory) {
+        ElectionTransport current = electionTransport;
+        if (current instanceof GrpcElectionTransport) {
+            return;
+        }
+        if (current != null) {
+            current.close();
+        }
+        electionTransport = new GrpcElectionTransport(id, directory, Constants.ELECTION_RPC_DEADLINE_MS,
+                this::logElectionTransport);
+    }
+
+    /** Lazily built so a worker without published endpoints still has a working (RMI) hop. */
+    private ElectionTransport electionTransport() {
+        ElectionTransport transport = electionTransport;
+        if (transport != null) {
+            return transport;
+        }
+        synchronized (this) {
+            transport = electionTransport;
+            if (transport == null) {
+                transport = new RmiElectionTransport(peerId -> neighbours.get(peerId), this::logElectionTransport);
+                electionTransport = transport;
+            }
+            return transport;
+        }
+    }
+
+    // Transport faults are already handled where they happen, so this only keeps the feed honest.
+    private void logElectionTransport(String message) {
+        recordEvent("ELECTION_TRANSPORT", message);
     }
 
     @Override
@@ -76,15 +129,18 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
         // Best candidate in this wave so far, compared by JAC then by id.
         int bestCandidateId;
         int bestCandidateJac;
+        // Highest term seen in this wave, so the root announces above everything it heard.
+        long maxTerm;
         // Neighbours that have not answered yet; the wave completes when this empties.
         final Set<Integer> pendingChildren = ConcurrentHashMap.newKeySet();
         // Latch so a wave echoes upward exactly once, however many triggers fire.
         boolean echoed = false;
 
-        ElectionState(int parentId, int bestCandidateId, int bestCandidateJac) {
+        ElectionState(int parentId, int bestCandidateId, int bestCandidateJac, long term) {
             this.parentId = parentId;
             this.bestCandidateId = bestCandidateId;
             this.bestCandidateJac = bestCandidateJac;
+            this.maxTerm = term;
         }
     }
 
@@ -250,9 +306,10 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
         seenMessageIds.add(messageId);
 
         int currentJac = jobAllocationCounter.get();
-        ElectionState election = new ElectionState(this.id, this.id, currentJac);
+        long term = currentTerm.get();
+        ElectionState election = new ElectionState(this.id, this.id, currentJac, term);
         recordEvent(WorkerEvent.ELECTION_STARTED,
-                "started election wave " + messageId + " (JAC " + currentJac + ")");
+                "started election wave " + messageId + " (JAC " + currentJac + ", term " + term + ")");
 
         for (Integer neighborId : neighbours.keySet()) {
             election.pendingChildren.add(neighborId);
@@ -260,13 +317,11 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
 
         elections.put(messageId, election);
 
-        List<Map.Entry<Integer, WorkerRemote>> snapshot = new ArrayList<>(neighbours.entrySet());
-        for (Map.Entry<Integer, WorkerRemote> entry : snapshot) {
-            try {
-                entry.getValue().receiveElectionMessage(this.id, this.id, currentJac, messageId);
-            } catch (RemoteException e) {
-                election.pendingChildren.remove(entry.getKey());
-                handleDeadNeighbour(entry.getKey());
+        ElectionTransport transport = electionTransport();
+        for (Integer neighborId : new ArrayList<>(neighbours.keySet())) {
+            if (!transport.sendElection(neighborId, this.id, this.id, currentJac, messageId, term)) {
+                election.pendingChildren.remove(neighborId);
+                handleDeadNeighbour(neighborId);
             }
         }
 
@@ -278,8 +333,25 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     }
 
     @Override
-    // Folds an incoming wave in: we win on lower JAC, then on higher id.
+    // Legacy RMI hop: a wave with no term keeps the previous accept-any behaviour.
     public void receiveElectionMessage(int originId, int candidateId, int candidateJac, long messageId) throws RemoteException {
+        applyElectionMessage(originId, candidateId, candidateJac, messageId, 0L);
+    }
+
+    /** gRPC wave hop; the algorithm below is the one place the protocol lives. */
+    @Override
+    public void onElectionMessage(ElectionMessage message) {
+        applyElectionMessage(message.getOriginId(), message.getCandidateId(), message.getCandidateJac(),
+                message.getMessageId(), message.getTerm());
+    }
+
+    // Folds an incoming wave in: we win on lower JAC, then on higher id.
+    private void applyElectionMessage(int originId, int candidateId, int candidateJac, long messageId, long term) {
+        // A hop below our own term belongs to a superseded wave; answering it would only
+        // revive a coordinator the cluster has already moved past.
+        if (term > 0 && term < currentTerm.get()) {
+            return;
+        }
         seenMessageIds.add(messageId);
 
         int currentJac = jobAllocationCounter.get();
@@ -308,7 +380,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
                 alreadySeen[0] = existing;
                 return existing;
             }
-            ElectionState election = new ElectionState(parentId, ourBestId, ourBestJac);
+            ElectionState election = new ElectionState(parentId, ourBestId, ourBestJac, term);
             for (Integer neighborId : neighbours.keySet()) {
                 if (neighborId != parentId) {
                     election.pendingChildren.add(neighborId);
@@ -327,12 +399,8 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
                 best[0] = seen.bestCandidateId;
                 best[1] = seen.bestCandidateJac;
             }
-            try {
-                WorkerRemote sender = neighbours.get(parentId);
-                if (sender != null) {
-                    sender.receiveEchoMessage(messageId, this.id, best[0], best[1]);
-                }
-            } catch (RemoteException ignored) {
+            ElectionTransport transport = electionTransport();
+            if (!transport.sendEcho(parentId, messageId, this.id, best[0], best[1], term)) {
                 handleDeadNeighbour(parentId);
             }
             return;
@@ -341,22 +409,17 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
         ElectionState election = created[0];
         // Lazy 2-hop seed: first wave from a new parent teaches us its neighbour set.
         if (!twoHop.containsKey(parentId)) {
-            WorkerRemote parentStub = neighbours.get(parentId);
-            if (parentStub != null) {
-                refreshTwoHop(parentId, parentStub);
-            }
+            refreshTwoHop(parentId, neighbours.get(parentId));
         }
 
         // Forward to every neighbour except the one this wave arrived from.
-        List<Map.Entry<Integer, WorkerRemote>> snapshot = new ArrayList<>(neighbours.entrySet());
-        for (Map.Entry<Integer, WorkerRemote> entry : snapshot) {
-            if (entry.getKey() != originId) {
-                try {
-                    entry.getValue().receiveElectionMessage(this.id, ourBestId, ourBestJac, messageId);
-                } catch (RemoteException e) {
+        ElectionTransport transport = electionTransport();
+        for (Integer neighborId : new ArrayList<>(neighbours.keySet())) {
+            if (neighborId != parentId) {
+                if (!transport.sendElection(neighborId, this.id, ourBestId, ourBestJac, messageId, term)) {
                     // Unreachable neighbour: stop waiting on it and rewire past it.
-                    election.pendingChildren.remove(entry.getKey());
-                    handleDeadNeighbour(entry.getKey());
+                    election.pendingChildren.remove(neighborId);
+                    handleDeadNeighbour(neighborId);
                 }
             }
         }
@@ -367,32 +430,75 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     }
 
     @Override
-    // Applies a coordinator announcement and relays it onward to the whole network.
+    // Legacy RMI announcement: no term, so it is applied exactly as it was before gRPC terms.
     public void receiveCoordinatorMessage(int coordinatorId, long messageId) throws RemoteException {
+        applyCoordinatorAnnouncement(coordinatorId, messageId, 0L);
+    }
+
+    /** gRPC announcement hop. */
+    @Override
+    public void onCoordinatorAnnouncement(CoordinatorAnnouncement announcement) {
+        applyCoordinatorAnnouncement(announcement.getCoordinatorId(), announcement.getMessageId(),
+                announcement.getTerm());
+    }
+
+    // Applies a coordinator announcement and relays it onward to the whole network.
+    private void applyCoordinatorAnnouncement(int coordinatorId, long messageId, long term) {
         // First sighting; a broadcast that loops back to us stops here.
         if (!seenCoordinatorMessageIds.add(messageId)) {
             return;
         }
-        this.currentCoordinatorId = coordinatorId;
-        handoverInProgress.set(false);
-        if (coordinatorId == this.id) {  
-           termJobsCoordinated.set(0);
+        if (!acceptLeadership(coordinatorId, term, "announced")) {
+            return;
         }
 
-        List<Map.Entry<Integer, WorkerRemote>> snapshot = new ArrayList<>(neighbours.entrySet());
-        for (Map.Entry<Integer, WorkerRemote> entry : snapshot) {
-            try {
-                entry.getValue().receiveCoordinatorMessage(coordinatorId, messageId);
-            } catch (RemoteException ignored) {
-                handleDeadNeighbour(entry.getKey());
+        ElectionTransport transport = electionTransport();
+        for (Integer neighborId : new ArrayList<>(neighbours.keySet())) {
+            if (!transport.sendAnnouncement(neighborId, coordinatorId, messageId, term)) {
+                handleDeadNeighbour(neighborId);
             }
         }
+    }
+
+    /**
+     * Decides whether an announcement may become this worker's leadership view.
+     *
+     * <p>A term-bearing announcement is applied only when (term, coordinator_id) is not older
+     * than the pair already held, ties going to the higher tuple. A term-less announcement is
+     * the legacy RMI path and is applied unconditionally, so the fallback keeps its A1 semantics:
+     * under the old contract a rotation to a lower worker id is legal, and refusing it here
+     * would silently break the five-job term.
+     */
+    private boolean acceptLeadership(int coordinatorId, long term, String cause) {
+        if (term > 0) {
+            long heldTerm = currentTerm.get();
+            if (term < heldTerm) {
+                return false;
+            }
+            if (term == heldTerm && coordinatorId <= currentCoordinatorId) {
+                return false;
+            }
+        }
+        this.currentCoordinatorId = coordinatorId;
+        if (term > currentTerm.get()) {
+            currentTerm.set(term);
+        }
+        handoverInProgress.set(false);
+        if (coordinatorId == this.id) {
+            termJobsCoordinated.set(0);
+        }
+        if (cause.equals("announced") && coordinatorId != this.id) {
+            recordEvent(WorkerEvent.COORDINATOR_ANNOUNCED, "coordinator is now Worker " + coordinatorId
+                    + " (term " + term + ")");
+        }
+        return true;
     }
 
     // Local only: a joiner learned this from one peer, and relaying would read as a new term.
     public void adoptCoordinator(int coordinatorId, long messageId) {
         seenCoordinatorMessageIds.add(messageId);
         this.currentCoordinatorId = coordinatorId;
+        handoverInProgress.set(false);
         recordEvent(WorkerEvent.COORDINATOR_ADOPTED, "adopted coordinator Worker " + coordinatorId);
         if (coordinatorId == this.id) {
             termJobsCoordinated.set(0);
@@ -400,8 +506,20 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     }
 
     @Override
-    // Folds a child's answer in and completes the wave once nobody is outstanding.
+    // Legacy RMI echo hop.
     public void receiveEchoMessage(long messageId, int fromWorkerId, int bestCandidateId, int bestCandidateJac) throws RemoteException {
+        applyEchoMessage(messageId, fromWorkerId, bestCandidateId, bestCandidateJac, 0L);
+    }
+
+    /** gRPC echo hop. */
+    @Override
+    public void onEchoMessage(EchoMessage message) {
+        applyEchoMessage(message.getMessageId(), message.getFromWorkerId(), message.getBestCandidateId(),
+                message.getBestCandidateJac(), message.getTerm());
+    }
+
+    // Folds a child's answer in and completes the wave once nobody is outstanding.
+    private void applyEchoMessage(long messageId, int fromWorkerId, int bestCandidateId, int bestCandidateJac, long term) {
         ElectionState election = elections.get(messageId);
         if (election == null) {
             return;
@@ -418,6 +536,9 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
                     election.bestCandidateJac = bestCandidateJac;
                 }
             }
+            // The root announces above every term the wave saw, so its verdict cannot be
+            // mistaken for one of the older waves still echoing back.
+            election.maxTerm = Math.max(election.maxTerm, term);
 
             election.pendingChildren.remove(fromWorkerId);
 
@@ -438,36 +559,28 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
             election.echoed = true;
         }
 
+        ElectionTransport transport = electionTransport();
         // We started this wave, so we are the root and decide the outcome.
         if (election.parentId == this.id) {
-            this.currentCoordinatorId = election.bestCandidateId;
-            handoverInProgress.set(false);
-            if (election.bestCandidateId == this.id) {
-                termJobsCoordinated.set(0);
-            }
+            // One above the highest term this wave carried, so every node can order the verdict.
+            long announceTerm = Math.max(currentTerm.get(), election.maxTerm) + 1;
+            acceptLeadership(election.bestCandidateId, announceTerm, "won");
             recordEvent(WorkerEvent.COORDINATOR_ANNOUNCED, "announced coordinator Worker "
-                    + election.bestCandidateId + " (wave " + messageId + ")");
+                    + election.bestCandidateId + " (wave " + messageId + ", term " + announceTerm + ")");
             // Offset, so a coordinator announcement can never collide with an election id.
             long coordMessageId = messageId + 1000000L;
             // Record before broadcasting, or our own announcement returns and resets the term.
             seenCoordinatorMessageIds.add(coordMessageId);
-            List<Map.Entry<Integer, WorkerRemote>> snapshot = new ArrayList<>(neighbours.entrySet());
-            for (Map.Entry<Integer, WorkerRemote> entry : snapshot) {
-                try {
-                    entry.getValue().receiveCoordinatorMessage(election.bestCandidateId, coordMessageId);
-                } catch (RemoteException ignored) {
-                    handleDeadNeighbour(entry.getKey());
+            for (Integer neighborId : new ArrayList<>(neighbours.keySet())) {
+                if (!transport.sendAnnouncement(neighborId, election.bestCandidateId, coordMessageId, announceTerm)) {
+                    handleDeadNeighbour(neighborId);
                 }
             }
         } else {
             // Send our merged best back to the node that forwarded this wave.
-            WorkerRemote parentStub = neighbours.get(election.parentId);
-            if (parentStub != null) {
-                try {
-                    parentStub.receiveEchoMessage(messageId, this.id, election.bestCandidateId, election.bestCandidateJac);
-                } catch (RemoteException ignored) {
-                    handleDeadNeighbour(election.parentId);
-                }
+            if (!transport.sendEcho(election.parentId, messageId, this.id,
+                    election.bestCandidateId, election.bestCandidateJac, election.maxTerm)) {
+                handleDeadNeighbour(election.parentId);
             }
         }
     }
@@ -498,6 +611,10 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
 
     // Best-effort fetch of a neighbour's neighbour set; a failure means the peer just died.
     private void refreshTwoHop(int neighbourId, WorkerRemote stub) {
+        if (stub == null) {
+            // No stub means no link to learn from, which is not a failure to report.
+            return;
+        }
         try {
             Set<Integer> ids = stub.getNeighbourIds();
             if (ids != null) {
