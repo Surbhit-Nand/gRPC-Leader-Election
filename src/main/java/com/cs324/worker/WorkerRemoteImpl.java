@@ -53,8 +53,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
                         catch (RemoteException e) { return false; }
                     }, workerId -> {
                         jobAllocationCounter.incrementAndGet();
-                        recordEvent(WorkerEvent.TASK_DISPATCHED, "gRPC slice -> Worker " + workerId);
-                    }, this::maybeRotateCoordinator, executor, progress, java.time.Duration.ofMinutes(10));
+                    }, this::maybeRotateCoordinator, executor, progress, java.time.Duration.ofMinutes(10), this::recordEvent);
             progressServer = io.grpc.ServerBuilder.forPort(0).addService(progress).addService(grpcJobs).build().start();
         }
     }

@@ -34,7 +34,7 @@ registry fields distinguish the two ports during the migration:
 WorkerEndpoint.port still identifies the RMI contact used by the existing peer
 network. Job RPCs use grpc_port exclusively. This avoids guessing a port or sending
 HTTP/2 traffic to an RMI registry. A directory snapshot excludes workers that have
-not yet published a ready job listener. New workers participate in subsequent jobs.
+not yet published a ready job listener. New workers participate in subsequent jobs and can receive unfinished slices during recovery.
 
 ## Run
 
@@ -70,18 +70,48 @@ progress breakdown. The GUI retains its CSV controls and input validation.
 
 ## Remaining work
 
-Election, heartbeat probes, peer links and cluster-monitor queries still use the
+Election, legacy network heartbeat probes, peer links and cluster-monitor queries still use the
 existing RMI implementation. The registry also uses that contact for peer selection.
 The legacy RMI job API remains for compatibility tests, but the updated GUI's job
 submission, task dispatch, result reporting and callback path use gRPC exclusively.
 This is the computation integration, not a claim that the entire A2 migration is done.
 
-Worker reassignment/recovery belongs to `worker-failure-recovery`. This branch
-reports assignment failures and times out unfinished jobs after ten minutes; it
-does not retry or reassign slices. A timeout is a bounded error path, not a failure
-detector. Running slices may finish after a job fails. Callback failure is logged;
-there is no durable result replay or coordinator crash recovery yet. Deduplication
-state is in memory and retained until the worker process exits.
+## Worker failure recovery
+
+Each slice has a stable task ID and an attempt number. Results must match the
+current slice, attempt and worker; duplicate and delayed results are acknowledged
+without changing aggregation. A worker can execute multiple slices of one job.
+The additive protobuf fields preserve existing field numbers and RPC names;
+rebuild all workers together because recovery requires echoed task/attempt IDs.
+
+While a remote slice is unfinished, its coordinator repeats the same AssignTask
+RPC every 500 ms, with a one-second deadline and at most one probe in flight per
+slice. Workers acknowledge repeated assignments without repeating computation;
+a completed attempt resends its cached result. This detects a stopped or
+unreachable worker even after the original assignment was acknowledged, and also
+recovers a lost result callback. A slow calculation with a responsive gRPC server
+continues on its original worker. Network delays can trigger reassignment, but
+attempt fencing prevents either copy from being counted twice.
+
+On RPC failure, the coordinator fences the attempt, refreshes discovery through
+gRPC RegistryService, and assigns the slice to a surviving remote worker,
+preferring one with fewer outstanding slices. Newly joined workers are eligible.
+Failed workers are excluded for that job. If discovery is unavailable or no remote
+candidate remains, the coordinator computes the slice itself. Subsequent jobs
+refresh membership independently. Probes, discovery, reassignment, partial
+results and delivery to the original client use gRPC, not RMI.
+
+Progress transfers unfinished units to the replacement worker atomically and
+preserves completed units. The original coordinator aggregates each slice once
+and sends MAX, PRIMESUM or PRIMECOUNT to the original submitting client, including
+after normal leader rotation. The existing ten-minute overall deadline still
+bounds a stalled job; recovery does not extend it.
+
+Recovery state and cached worker results are in memory until process exit.
+Coordinator crash recovery and durable final-client callback replay are outside
+this feature. Final callback failure is logged. Repeated assignments currently
+resend the slice payload; a lightweight dedicated heartbeat would reduce traffic
+for large inputs.
 
 ## Verification
 
@@ -93,3 +123,49 @@ GrpcJobDistributionTest combines the real shared registry, job services, client
 callback and progress stream over TCP. It covers all operations, long sums,
 concurrency, duplicate IDs, endpoint publication, joins, invalid inputs and
 unreachable workers. Existing bootstrap and frozen-contract tests remain applicable.
+
+GrpcWorkerRecoveryTest uses real TCP gRPC servers without RMI. It stops workers
+after they accept active tasks, adds a worker mid-job, injects stale/duplicate
+results, verifies all three operations and progress, checks multiple failed
+slices with local fallback, and confirms that slow responsive workers keep their
+work without recalculation.
+
+## Recovery rationale and demonstration
+
+The failure detector treats an RPC error or missing acknowledgement as suspicion,
+not proof of a crash. A crashed process and a network partition cannot be
+distinguished from a single timeout. Reassignment therefore permits duplicate
+execution, while task/attempt/owner checks allow each slice to affect aggregation
+only once. This matters especially for PRIMESUM and PRIMECOUNT: adding both copies
+would silently produce the wrong answer. MAX also rejects stale ownership rather
+than relying on its aggregation being insensitive to equal duplicates.
+
+The 500 ms probe interval and one-second deadline favour quick recovery for a
+local demonstration. A silent endpoint is normally suspected within roughly
+1.5 seconds, excluding scheduling and recovery discovery delays. On a slower
+network these constants should be increased to avoid unnecessary recomputation.
+Acknowledgements are independent of calculation completion, so a long-running
+prime range does not itself trigger reassignment. Probe messages reuse cached
+protobuf assignments, and workers decode only newly accepted attempts.
+
+To demonstrate deterministically, run:
+
+```powershell
+mvn '-Dtest=GrpcWorkerRecoveryTest' test
+```
+
+The tests include a server that remains connected but stops answering assignment
+RPCs, recovery of three concurrent jobs, a PRIMESUM range whose answer exceeds
+32 bits, and a lost result callback that must be replayed without recalculation.
+These complement the stopped-server, new-worker and stale-result scenarios.
+
+For a manual demonstration, start bootstrap, at least three workers and a client
+using the commands above. Submit a sufficiently long PRIMESUM range, then close
+a non-coordinator worker while its progress row is still Processing. Observe the
+coordinator log identifying the job, task, failed worker, replacement worker and
+new attempt number. The client progress breakdown should transfer unfinished
+units to the replacement and eventually deliver the correct answer. Repeat the
+same input without failure to compare results. Starting another worker before a
+failure lets it receive reassigned work when discovery includes its published
+endpoint. Do not close the original job coordinator for this demonstration:
+recovering its job state is the separate coordinator-failure feature.

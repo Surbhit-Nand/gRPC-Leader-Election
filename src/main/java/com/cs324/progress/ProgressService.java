@@ -18,6 +18,15 @@ public final class ProgressService extends JobProgressServiceGrpc.JobProgressSer
         snapshots.put(jobId, snapshot.build());
     }
 
+    /** Atomically move unfinished units during recovery without ending the stream. */
+    public synchronized void update(int jobId, Map<Integer, Long> totals, Map<Integer, Long> completed, Set<Integer> pending) {
+        JobProgress.Builder next = JobProgress.newBuilder().setJobId(jobId);
+        totals.forEach((id, total) -> next.addWorkers(WorkerProgress.newBuilder().setWorkerId(id).setTotalUnits(total)
+                .setCompletedUnits(completed.getOrDefault(id, 0L)).setStatus(pending.contains(id) ? "Processing" : "Completed")));
+        next.setFinished(pending.isEmpty());
+        publish(next.build());
+    }
+
     public synchronized void complete(int jobId, int workerId, boolean success) {
         JobProgress current = snapshots.get(jobId);
         if (current == null) return;
@@ -31,6 +40,11 @@ public final class ProgressService extends JobProgressServiceGrpc.JobProgressSer
         }
         next.setFinished(next.getWorkersList().stream().noneMatch(w -> w.getStatus().equals("Processing")));
         JobProgress snapshot = next.build();
+        publish(snapshot);
+    }
+
+    private void publish(JobProgress snapshot) {
+        int jobId = snapshot.getJobId();
         snapshots.put(jobId, snapshot);
         List<ServerCallStreamObserver<JobProgress>> listeners = watchers.get(jobId);
         if (listeners != null) {

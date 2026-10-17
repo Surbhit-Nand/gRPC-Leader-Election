@@ -22,6 +22,9 @@ public record WorkerEvent(long seq, int workerId, long epochMillis, String kind,
     public static final String TASK_DISPATCHED = "TASK_DISPATCHED";
     // A dispatched slice arrived here for local computation.
     public static final String TASK_RECEIVED = "TASK_RECEIVED";
+    public static final String WORKER_FAILED = "WORKER_FAILED";
+    public static final String TASK_REASSIGNED = "TASK_REASSIGNED";
+    public static final String TASK_COMPLETED = "TASK_COMPLETED";
     // Clean exit: handed the neighbour set over before deregistering.
     public static final String LEAVING = "LEAVING";
 }
