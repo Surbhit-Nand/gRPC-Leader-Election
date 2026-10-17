@@ -15,6 +15,19 @@ import com.cs324.election.RmiElectionTransport;
 import com.cs324.election.proto.CoordinatorAnnouncement;
 import com.cs324.election.proto.EchoMessage;
 import com.cs324.election.proto.ElectionMessage;
+import com.cs324.failover.CheckpointLog;
+import com.cs324.failover.CheckpointReplicator;
+import com.cs324.failover.CheckpointSink;
+import com.cs324.failover.CoordinatorHealthMonitor;
+import com.cs324.failover.FailoverCoordinator;
+import com.cs324.failover.FailoverGrpcService;
+import com.cs324.failover.FailoverHandler;
+import com.cs324.failover.GrpcCoordinatorProbe;
+import com.cs324.failover.JobCheckpoint;
+import com.cs324.failover.RestoredJob;
+import com.cs324.failover.proto.CheckpointEntry;
+import com.cs324.failover.proto.HeartbeatReply;
+import com.cs324.job.proto.TaskResult;
 import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
@@ -39,7 +52,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemote, ElectionHandler {
+public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemote, ElectionHandler, FailoverHandler {
     private final com.cs324.progress.ProgressService progress = new com.cs324.progress.ProgressService();
     private io.grpc.Server progressServer;
     private com.cs324.computation.RegistryClient grpcDirectory;
@@ -54,6 +67,20 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     // term, so ordering only ever applies to announcements that came over gRPC.
     private final AtomicLong currentTerm = new AtomicLong(0);
 
+    // Coordinator failover (Member 2). The replica exists on every worker, not only on the
+    // coordinator, because the replica is what a survivor reads during a takeover.
+    private final CheckpointLog checkpoints;
+    private volatile CheckpointReplicator replicator;
+    private volatile CoordinatorHealthMonitor healthMonitor;
+    private volatile GrpcCoordinatorProbe probe;
+    private volatile FailoverCoordinator failover;
+    // Set while a new coordinator merges and rebuilds; jobs are refused in that window so a
+    // client cannot start the same work twice, once here and once through recovery.
+    private final AtomicBoolean failoverInProgress = new AtomicBoolean(false);
+    // Coordinator id and time of the failure we last reacted to, for storm suppression.
+    private final java.util.concurrent.atomic.AtomicReference<String> lastFailure =
+            new java.util.concurrent.atomic.AtomicReference<>();
+
     // Share one listener for computation, progress and election, preserving term limits and JAC accounting.
     public synchronized void startProgressServer() throws java.io.IOException {
         if (progressServer == null) {
@@ -65,13 +92,18 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
                         return grpcDirectory.workers();
                     }, jobId -> {
                         if (currentCoordinatorId != id || handoverInProgress.get()) return false;
+                        // Refuse while a takeover is rebuilding jobs, or the same work could be
+                        // accepted fresh here and resumed from the log a moment later.
+                        if (failoverInProgress.get()) return false;
                         try { reserveTermSlot(jobId); return true; }
                         catch (RemoteException e) { return false; }
                     }, workerId -> {
                         jobAllocationCounter.incrementAndGet();
                     }, this::maybeRotateCoordinator, executor, progress, java.time.Duration.ofMinutes(10), this::recordEvent);
+            grpcJobs.setCheckpointSink(new ReplicatingCheckpointSink());
             progressServer = io.grpc.ServerBuilder.forPort(0).addService(progress).addService(grpcJobs)
-                    .addService(new ElectionGrpcService(this)).build().start();
+                    .addService(new ElectionGrpcService(this))
+                    .addService(new FailoverGrpcService(this, id)).build().start();
         }
     }
 
@@ -82,7 +114,45 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
         grpcDirectory.publish(id, host, rmiPort, getProgressPort());
         // From here on the election wave travels over gRPC, resolved through the same directory.
         useGrpcElectionTransport(grpcDirectory);
+        startFailoverServices();
         System.out.println("Worker " + id + " gRPC jobs and progress on port " + getProgressPort());
+    }
+
+    /**
+     * Starts the failover parts: replication out, health monitoring in, and the takeover that
+     * runs when this worker wins. Called once the directory is usable, because every one of
+     * them resolves peers through it.
+     */
+    private synchronized void startFailoverServices() {
+        if (replicator != null) {
+            return;
+        }
+        replicator = new CheckpointReplicator(id, grpcDirectory, executor, this::logFailover);
+        failover = new FailoverCoordinator(id, checkpoints, replicator,
+                (job, remainingMillis) -> grpcJobs != null && grpcJobs.restore(job, remainingMillis),
+                job -> grpcJobs != null && grpcJobs.deliverResult(job.request(), tombstoneResult(job)),
+                currentTerm::get, java.time.Duration.ofMinutes(10).toMillis(), this::logFailover);
+        probe = new GrpcCoordinatorProbe(id, grpcDirectory, currentTerm::get,
+                () -> currentCoordinatorId, this::logFailover);
+        healthMonitor = new CoordinatorHealthMonitor(id, () -> currentCoordinatorId, probe,
+                this::requestFailoverElection, this::observeLeadershipDrift, this::logFailover);
+        healthMonitor.start();
+    }
+
+    private TaskResult tombstoneResult(RestoredJob job) {
+        for (RestoredJob.RestoredSlice slice : job.slices()) {
+            if (slice.result() != null) {
+                return slice.result();
+            }
+        }
+        // A finished job whose result no slice carries: nothing useful left to replay.
+        return com.cs324.job.proto.TaskResult.newBuilder().setJobId(job.jobId())
+                .setWorkerId(id).setError("Result unavailable after coordinator failure").build();
+    }
+
+    // Failover bookkeeping is operational detail; the feed keeps it, stdout stays clean.
+    private void logFailover(String message) {
+        recordEvent("FAILOVER_DETAIL", message);
     }
 
     /** Switches election hops to gRPC. Idempotent, so a re-published endpoint is harmless. */
@@ -216,6 +286,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     public WorkerRemoteImpl(int id) throws RemoteException {
         super();
         this.id = id;
+        this.checkpoints = new CheckpointLog(id);
     }
 
     @Override
@@ -479,6 +550,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
                 return false;
             }
         }
+        boolean changed = this.currentCoordinatorId != coordinatorId || (term > 0 && term > currentTerm.get());
         this.currentCoordinatorId = coordinatorId;
         if (term > currentTerm.get()) {
             currentTerm.set(term);
@@ -490,6 +562,10 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
         if (cause.equals("announced") && coordinatorId != this.id) {
             recordEvent(WorkerEvent.COORDINATOR_ANNOUNCED, "coordinator is now Worker " + coordinatorId
                     + " (term " + term + ")");
+        }
+        // Winning is the moment to find out what the previous coordinator was holding.
+        if (changed && coordinatorId == this.id) {
+            takeOverLeadership();
         }
         return true;
     }
@@ -1034,8 +1110,180 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     public void setBootstrapReference(BootstrapRemote bootstrap, String localHost) {
         this.bootstrap = bootstrap;
         this.localHost = localHost;
-        heartbeatExecutor.scheduleAtFixedRate(this::heartbeatTick,
-                Constants.HEARTBEAT_INTERVAL_MS, Constants.HEARTBEAT_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        if (Constants.LEGACY_RMI_HEARTBEAT_ENABLED) {
+            // Reference implementation only: the gRPC health monitor is the cluster's single
+            // failure detector, and two detectors race to start elections.
+            heartbeatExecutor.scheduleAtFixedRate(this::heartbeatTick,
+                    Constants.HEARTBEAT_INTERVAL_MS, Constants.HEARTBEAT_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    /** This worker's own leadership view, sent as the reply to a follower probing it. */
+    @Override
+    public HeartbeatReply heartbeat(int fromWorkerId, long followerTerm, int followerCoordinatorId) {
+        return HeartbeatReply.newBuilder()
+                .setTerm(currentTerm.get())
+                .setCoordinatorId(currentCoordinatorId)
+                .setIsCoordinator(currentCoordinatorId == id)
+                .build();
+    }
+
+    /** Folds entries a coordinator replicated to us; the sequence and term rules do the work. */
+    @Override
+    public long acceptEntries(int coordinatorId, long term, List<CheckpointEntry> entries) {
+        long highest = 0L;
+        for (CheckpointEntry entry : entries) {
+            if (checkpoints.apply(entry)) {
+                highest = Math.max(highest, entry.getSequence());
+            } else {
+                // Duplicate or stale: acknowledging it is still correct, because the replica
+                // already holds that state and the sender must not resend it forever.
+                highest = Math.max(highest, checkpoints.job(entry.getJobId()) == null
+                        ? 0L : checkpoints.job(entry.getJobId()).sequence());
+            }
+        }
+        return highest;
+    }
+
+    /** This replica's recoverable jobs, as entries a new coordinator can fold. */
+    @Override
+    public List<CheckpointEntry> snapshots() {
+        List<CheckpointEntry> entries = new ArrayList<>();
+        for (JobCheckpoint job : checkpoints.recoverable()) {
+            entries.addAll(checkpoints.snapshot(job.jobId()));
+        }
+        return entries;
+    }
+
+    /** The local replica, for tests and for the takeover's own merge. */
+    public CheckpointLog checkpointLog() {
+        return checkpoints;
+    }
+
+    /**
+     * Reacts to a coordinator this worker has decided is FAILED: jitter first, so survivors do
+     * not wave at the same instant, then one suppressed wave per failure.
+     *
+     * <p>The failure key is time based rather than a wave counter, because the whole point is
+     * that several workers notice the same death within a few hundred milliseconds of each
+     * other and must not each start their own.
+     */
+    private void requestFailoverElection(int failedCoordinator) {
+        long now = System.currentTimeMillis();
+        String failure = failedCoordinator + "@" + Constants.FAILOVER_SUPPRESSION_MS;
+        String previous = lastFailure.get();
+        if (failure.equals(previous)) {
+            return;
+        }
+        lastFailure.set(failure);
+        long jitter = Constants.FAILOVER_ELECTION_JITTER_MS <= 0 ? 0
+                : (long) (Math.random() * Constants.FAILOVER_ELECTION_JITTER_MS);
+        recordEvent(WorkerEvent.FAILOVER_STARTED, "coordinator Worker " + failedCoordinator
+                + " declared failed; starting an election in " + jitter + "ms");
+        try {
+            if (jitter > 0) {
+                Thread.sleep(jitter);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return;
+        }
+        startElection();
+    }
+
+    /**
+     * A heartbeat reply showed a generation newer than ours, so the cluster has already moved
+     * on. Adopting that view is cheaper and safer than starting an election of our own, and it
+     * is what makes a deposed coordinator step down instead of serving a term it has lost.
+     */
+    private void observeLeadershipDrift(long term, int coordinatorView) {
+        if (term <= currentTerm.get() || coordinatorView == -1) {
+            return;
+        }
+        boolean wasCoordinator = currentCoordinatorId == id;
+        if (acceptLeadership(coordinatorView, term, "drift") && wasCoordinator && coordinatorView != id) {
+            recordEvent(WorkerEvent.LEADERSHIP_STEP_DOWN, "Worker " + id + " stepped down for Worker "
+                    + coordinatorView + " at term " + term);
+        }
+    }
+
+    /**
+     * Runs when this worker becomes coordinator: merge every reachable replica, then rebuild
+     * the jobs whose owner died. Idempotent per job and term, and guarded so no new job is
+     * accepted while the merge is in flight.
+     */
+    private void takeOverLeadership() {
+        if (failover == null) {
+            return;
+        }
+        failoverInProgress.set(true);
+        try {
+            executor.execute(() -> {
+                try {
+                    failover.takeOver();
+                } catch (RuntimeException e) {
+                    recordEvent(WorkerEvent.FAILOVER_COMPLETED, "takeover stopped early: " + e.getMessage());
+                } finally {
+                    failoverInProgress.set(false);
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            // Shutting down: the next election will take over instead.
+            failoverInProgress.set(false);
+        }
+    }
+
+    /**
+     * Writes this coordinator's job transitions into the local replica and out to the peers.
+     *
+     * <p>Acceptance is the only entry that waits for a peer, because that is the one the client
+     * acknowledgement depends on; everything else is best effort and asynchronous.
+     */
+    private final class ReplicatingCheckpointSink implements CheckpointSink {
+
+        @Override
+        public void onAccepted(com.cs324.job.proto.SubmitJobRequest request,
+                List<SliceSnapshot> slices, long acceptedAtMillis) {
+            CheckpointEntry entry = checkpoints.acceptedEntry(request, slices, acceptedAtMillis,
+                    currentTerm.get(), id);
+            write(entry, true);
+        }
+
+        @Override
+        public void onSliceUpdated(int jobId, int taskId, com.cs324.registry.proto.WorkerEndpoint owner,
+                int attempt, TaskResult result) {
+            write(checkpoints.sliceEntry(jobId, taskId, owner, attempt, result, currentTerm.get(), id), false);
+        }
+
+        @Override
+        public void onFinished(int jobId, TaskResult result) {
+            write(checkpoints.finishedEntry(jobId, result, false, currentTerm.get(), id), false);
+        }
+
+        @Override
+        public void onDelivered(int jobId) {
+            checkpoints.markDelivered(jobId, true);
+            JobCheckpoint job = checkpoints.job(jobId);
+            if (job != null && job.finished()) {
+                write(checkpoints.finishedEntry(jobId, job.finalResult(), true, currentTerm.get(), id), false);
+            }
+        }
+
+        @Override
+        public void onDeliveryFailed(int jobId) {
+            checkpoints.markDelivered(jobId, false);
+        }
+
+        private void write(CheckpointEntry entry, boolean waitForPeer) {
+            checkpoints.apply(entry);
+            CheckpointReplicator active = replicator;
+            if (active == null) {
+                return;
+            }
+            active.replicate(List.of(entry), currentTerm.get(), waitForPeer);
+            recordEvent(WorkerEvent.CHECKPOINT_REPLICATED, "job " + entry.getJobId() + " sequence "
+                    + entry.getSequence() + " (" + entry.getEntryCase() + ")");
+        }
     }
 
     @Override
@@ -1097,6 +1345,11 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     public void shutdown() {
         if (grpcJobs != null) grpcJobs.close();
         if (grpcDirectory != null) grpcDirectory.close();
+        if (healthMonitor != null) healthMonitor.close();
+        if (probe != null) probe.close();
+        if (replicator != null) replicator.close();
+        ElectionTransport transport = electionTransport;
+        if (transport != null) transport.close();
         if (progressServer != null) progressServer.shutdownNow();
         executor.shutdown();
         heartbeatExecutor.shutdown();

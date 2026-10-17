@@ -10,7 +10,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.function.Consumer;
-import java.util.function.IntSupplier;
+import java.util.function.LongSupplier;
 
 /**
  * What a new coordinator does with the replicated log once it has won an election.
@@ -48,14 +48,14 @@ public final class FailoverCoordinator {
     private final CheckpointReplicator replicator;
     private final JobRestorer restorer;
     private final ResultDeliverer deliverer;
-    private final IntSupplier currentTerm;
+    private final LongSupplier currentTerm;
     private final long jobTimeoutMillis;
     private final Consumer<String> events;
     // One takeover per job and term, so repeated triggers cannot rebuild a job twice.
     private final Set<String> takenOver = new HashSet<>();
 
     public FailoverCoordinator(int selfId, CheckpointLog log, CheckpointReplicator replicator,
-            JobRestorer restorer, ResultDeliverer deliverer, IntSupplier currentTerm,
+            JobRestorer restorer, ResultDeliverer deliverer, LongSupplier currentTerm,
             long jobTimeoutMillis, Consumer<String> events) {
         this.selfId = selfId;
         this.log = log;
@@ -73,7 +73,7 @@ public final class FailoverCoordinator {
      * @return the number of jobs rebuilt in this pass.
      */
     public int takeOver() {
-        long term = Math.max(currentTerm.getAsInt(), 1);
+        long term = Math.max(currentTerm.getAsLong(), 1L);
         events.accept(WorkerEvent.FAILOVER_STARTED + ": merging replicated job state at term " + term);
         int merged = merge();
         int recovered = 0;
@@ -132,9 +132,9 @@ public final class FailoverCoordinator {
         List<WorkerEndpoint> live = replicator.readyPeers();
         List<RestoredJob.RestoredSlice> slices = new ArrayList<>(job.slices().size());
         for (JobCheckpoint.Slice slice : job.slices()) {
-            slices.add(restoreSlice(slice, live, term));
+            slices.add(restoreSlice(slice, live));
         }
-        RestoredJob restored = toRestoredJob(job, slices);
+        RestoredJob restored = new RestoredJob(job.request(), slices, job.delivered());
         if (!restorer.restore(restored, remainingMillis(job))) {
             return false;
         }
@@ -150,7 +150,7 @@ public final class FailoverCoordinator {
      * to the new coordinator with a higher attempt: the previous owner cannot answer, so the
      * slice is recomputed under a fresh attempt, which also fences any late answer from it.
      */
-    private RestoredJob.RestoredSlice restoreSlice(JobCheckpoint.Slice slice, List<WorkerEndpoint> live, long term) {
+    private RestoredJob.RestoredSlice restoreSlice(JobCheckpoint.Slice slice, List<WorkerEndpoint> live) {
         if (slice.completed()) {
             return new RestoredJob.RestoredSlice(slice.taskId(), slice.input(), slice.owner(),
                     slice.attempt(), slice.result());
@@ -171,10 +171,6 @@ public final class FailoverCoordinator {
             slices.add(new RestoredJob.RestoredSlice(slice.taskId(), slice.input(), slice.owner(),
                     slice.attempt(), slice.result()));
         }
-        return toRestoredJob(job, slices);
-    }
-
-    private static RestoredJob toRestoredJob(JobCheckpoint job, List<RestoredJob.RestoredSlice> slices) {
         return new RestoredJob(job.request(), slices, job.delivered());
     }
 
