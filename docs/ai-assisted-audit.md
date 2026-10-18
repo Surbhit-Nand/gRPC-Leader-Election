@@ -80,3 +80,12 @@ acknowledgement at that same sequence. `finishedSnapshotDoesNotConsumeTheNextDel
 reproduced source sequence `2` becoming replica sequence `3`. Snapshot construction
 now uses `N - 1` for the input envelope and `N` for the terminal marker, preserving
 the actual high-water mark and accepting the subsequent delivery update.
+
+## Missing terminal markers during takeover
+
+**High severity:** `WorkerRemoteImpl.snapshots` filtered out finished, delivered jobs.
+A survivor holding an older unfinished checkpoint could therefore never learn that
+another peer knew the job was already finished. The original regression returned an
+empty fetch for a retained delivered job. Fetch now includes all retained jobs,
+including terminal markers; the test confirms an older replica becomes finished
+and delivered. Existing bounded checkpoint retention still applies.

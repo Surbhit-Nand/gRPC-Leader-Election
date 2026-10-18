@@ -200,6 +200,21 @@ class CheckpointLogTest {
     }
 
     @Test
+    void deliveredTombstonesRemainVisibleToOtherReplicas() throws Exception {
+        var worker = new com.cs324.worker.WorkerRemoteImpl(4, false);
+        try {
+            CheckpointLog source = logWithAcceptedJob(7, 1);
+            source.apply(source.finishedEntry(7, TaskResult.newBuilder().setJobId(7).setLongResult(17L).build(), true, TERM_ONE, 1));
+            source.snapshot(7).forEach(worker.checkpointLog()::apply);
+            assertFalse(worker.snapshots().isEmpty(), "a stale peer needs the terminal marker to avoid recovering this job");
+            var replica = logWithAcceptedJob(7, 1);
+            worker.snapshots().forEach(replica::apply);
+            assertTrue(replica.job(7).finished());
+            assertTrue(replica.job(7).delivered());
+        } finally { worker.shutdown(); }
+    }
+
+    @Test
     void entriesWithoutARequestOrPayloadShapeAreRejected() {
         CheckpointLog log = new CheckpointLog(9);
         assertFalse(log.apply(CheckpointEntry.getDefaultInstance()), "an empty entry changes nothing");

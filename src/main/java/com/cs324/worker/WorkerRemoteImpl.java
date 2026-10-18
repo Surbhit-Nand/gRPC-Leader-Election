@@ -1171,12 +1171,12 @@ public class WorkerRemoteImpl implements WorkerRemote, ElectionHandler, Failover
         return highest;
     }
 
-    /** This replica's recoverable jobs, as entries a new coordinator can fold. */
+    /** Include retained terminal markers so a stale survivor never resurrects a finished job. */
     @Override
     public List<CheckpointEntry> snapshots() {
         List<CheckpointEntry> entries = new ArrayList<>();
-        for (JobCheckpoint job : checkpoints.recoverable()) {
-            entries.addAll(checkpoints.snapshot(job.jobId()));
+        for (int jobId : checkpoints.jobIds()) {
+            entries.addAll(checkpoints.snapshot(jobId));
         }
         return entries;
     }
