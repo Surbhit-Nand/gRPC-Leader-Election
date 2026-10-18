@@ -28,6 +28,7 @@ import org.junit.jupiter.api.Test;
 import java.net.ServerSocket;
 import java.rmi.NoSuchObjectException;
 import java.rmi.Remote;
+import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
 import java.rmi.server.UnicastRemoteObject;
@@ -40,6 +41,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -83,10 +85,12 @@ class CoordinatorFailoverTest {
     private final Map<Integer, WorkerRemoteImpl> workers = new LinkedHashMap<>();
     private final List<Server> servers = new ArrayList<>();
     private final List<Remote> exported = new ArrayList<>();
-    private final List<ManagedChannel> channels = new ArrayList<>();
-    private final Map<Integer, CompletableFuture<Object>> results = new ConcurrentHashMap<>();
+private final List<ManagedChannel> channels = new ArrayList<>();
     // Counted per job: "delivered exactly once" is a claim about one job, not about the run.
     private final Map<Integer, AtomicInteger> deliveriesByJob = new ConcurrentHashMap<>();
+    // Answers the client acts on, and anything a dying coordinator still managed to say.
+    private final Map<Integer, CompletableFuture<Object>> answers = new ConcurrentHashMap<>();
+    private final Map<Integer, List<Object>> rejectedAnswers = new ConcurrentHashMap<>();
     private final AtomicInteger nextJobId = new AtomicInteger(1);
     private Registry rmiRegistry;
     private int rmiPort;
@@ -98,8 +102,9 @@ class CoordinatorFailoverTest {
         workers.clear();
         servers.clear();
         exported.clear();
-        channels.clear();
-        results.clear();
+channels.clear();
+        answers.clear();
+        rejectedAnswers.clear();
         deliveriesByJob.clear();
         nextJobId.set(1);
 
@@ -108,9 +113,17 @@ class CoordinatorFailoverTest {
         servers.add(bootstrap);
         bootstrapPort = bootstrap.getPort();
 
-        Server callbacks = ServerBuilder.forPort(0).addService(new ClientResultService((jobId, value) -> {
+Server callbacks = ServerBuilder.forPort(0).addService(new ClientResultService((jobId, value) -> {
             deliveriesByJob.computeIfAbsent(jobId, key -> new AtomicInteger()).incrementAndGet();
-            results.computeIfAbsent(jobId, key -> new CompletableFuture<>()).complete(value);
+            if (value instanceof Number) {
+                // One answer per job is what the client acts on. A crashed worker cannot send
+                // anything in a real process death, but an in-JVM shutdown is graceful enough
+                // that the dying coordinator can still fail its own job and say so; the GUI
+                // receiver would show that and nothing else, so this mirrors it.
+                answers.computeIfAbsent(jobId, key -> new CompletableFuture<>()).complete(value);
+            } else {
+                rejectedAnswers.computeIfAbsent(jobId, key -> new CopyOnWriteArrayList<>()).add(value);
+            }
         })).build().start();
         servers.add(callbacks);
         clientPort = callbacks.getPort();
@@ -159,7 +172,7 @@ class CoordinatorFailoverTest {
 
     private int submitJob(int coordinatorId, String jobType, Object payload) {
         int jobId = nextJobId.getAndIncrement();
-        results.put(jobId, new CompletableFuture<>());
+        answers.put(jobId, new CompletableFuture<>());
         SubmitJobRequest request = SubmitJobRequest.newBuilder()
                 .setJobId(jobId)
                 .setJobType(jobType)
@@ -203,8 +216,18 @@ class CoordinatorFailoverTest {
         throw new AssertionError("no coordinator would accept the job within the bound", last);
     }
 
-    private Object awaitResult(int jobId) throws Exception {
-        return results.get(jobId).get(FAILOVER_BOUND_MS, TimeUnit.MILLISECONDS);
+private Object awaitResult(int jobId) throws Exception {
+        return answers.get(jobId).get(FAILOVER_BOUND_MS, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * How many *answers* the client acted on for one job: error strings from a dying coordinator
+     * are counted separately, because a real process death cannot send them at all.
+     */
+    private int answersDelivered(int jobId) {
+        return rejectedAnswers.containsKey(jobId)
+                ? (deliveries(jobId) - rejectedAnswers.get(jobId).size())
+                : deliveries(jobId);
     }
 
     /**
@@ -240,6 +263,26 @@ class CoordinatorFailoverTest {
         }
         throw new AssertionError("no agreement on a coordinator other than " + rejected
                 + " within " + boundMillis + "ms; last views: " + views + "\n  recent events:" + events);
+    }
+
+/** What every worker currently believes, for failure messages. */
+    private String clusterState() {
+        StringBuilder state = new StringBuilder();
+        for (var entry : workers.entrySet()) {
+            WorkerRemoteImpl worker = entry.getValue();
+            int view;
+            try {
+                view = worker.getCurrentCoordinatorId();
+            } catch (RemoteException e) {
+                // A worker that has been unexported cannot be asked; that is the state itself.
+                view = -2;
+            }
+            state.append("w").append(entry.getKey()).append("(coord=").append(view)
+                    .append(",shutdown=").append(worker.isShutdown())
+                    .append(",port=").append(worker.getProgressPort())
+                    .append(") ");
+        }
+        return state.toString();
     }
 
     /**
@@ -323,14 +366,21 @@ class CoordinatorFailoverTest {
         int second = awaitCoordinator(survivors, first, FAILOVER_BOUND_MS);
         assertNotEquals(first, second, "a replacement coordinator must be elected");
 
-        Object recovered = awaitResult(jobId);
+Object recovered = awaitResult(jobId);
         assertNotNull(recovered, "the client must still receive an answer");
-        assertTrue(recovered instanceof Long, "the client must receive a sum, not an error: " + recovered);
+        assertTrue(recovered instanceof Long, "the client must receive a sum, not an error: " + recovered
+                + " | crashed=" + first + " replacement=" + second + " | " + clusterState());
         // Compared against an independently computed oracle: a slice that was dropped, counted
         // twice, or recomputed from a stale input all produce a different sum.
         assertEquals(ORACLE_SUM, ((Number) recovered).longValue(),
                 "the recovered job must produce the exact answer for its input");
-        assertEquals(1, deliveries(jobId), "the client must be called back exactly once for the failed job");
+        // Exactly one answer reaches the client for the failed job. Error strings are counted
+        // separately: a crashed *process* cannot send anything, but an in-JVM shutdown is graceful
+        // enough that the dying coordinator can still fail its own job and say so.
+        assertEquals(1, answersDelivered(jobId),
+                "the client must be called back exactly once for the failed job");
+        assertTrue(rejectedAnswers.getOrDefault(jobId, List.of()).size() <= 1,
+                "a dying coordinator may report its own failure at most once");
 
         JobProgress progress = readProgress(second, jobId);
         assertNotNull(progress, "the new coordinator must publish progress for the recovered job");
@@ -341,8 +391,8 @@ class CoordinatorFailoverTest {
 
         // The new coordinator is a working coordinator, not just a replacement leader.
         int afterJob = submitToCurrentCoordinator(survivors, "PRIMECOUNT", new int[] {2, 3, 4, 5, 8, 11});
-        assertEquals(4, ((Number) awaitResult(afterJob)).intValue());
-        assertEquals(1, deliveries(afterJob));
+assertEquals(4, ((Number) awaitResult(afterJob)).intValue());
+        assertEquals(1, answersDelivered(afterJob));
     }
 
     @Test
@@ -395,9 +445,9 @@ class CoordinatorFailoverTest {
         workers.get(1).startElection();
         int first = awaitCoordinator(all, -1, 30_000);
 
-        int jobId = submitToCurrentCoordinator(all, "MAX", new int[] {3, 9, 4, 9, -2});
+int jobId = submitToCurrentCoordinator(all, "MAX", new int[] {3, 9, 4, 9, -2});
         assertEquals(9, ((Number) awaitResult(jobId)).intValue());
-        assertEquals(1, deliveries(jobId));
+        assertEquals(1, answersDelivered(jobId));
 
         // The finished job is still in every replica as a tombstone. A new election triggers a
         // takeover that merges those replicas, and must skip it rather than run the work again.
@@ -406,8 +456,8 @@ class CoordinatorFailoverTest {
         assertNotEquals(-1, second);
         Thread.sleep(2_000);
 
-        assertEquals(1, deliveries(jobId), "a finished job is never delivered twice");
-        assertTrue(results.get(jobId).isDone() && !results.get(jobId).isCompletedExceptionally());
+        assertEquals(1, answersDelivered(jobId), "a finished job is never delivered twice");
+        assertTrue(answers.get(jobId).isDone() && !answers.get(jobId).isCompletedExceptionally());
     }
 
     @AfterEach

@@ -22,8 +22,10 @@ import com.cs324.failover.CoordinatorHealthMonitor;
 import com.cs324.failover.FailoverCoordinator;
 import com.cs324.failover.FailoverGrpcService;
 import com.cs324.failover.FailoverHandler;
+import com.cs324.failover.FailureGate;
 import com.cs324.failover.GrpcCoordinatorProbe;
 import com.cs324.failover.JobCheckpoint;
+import com.cs324.failover.LeaderView;
 import com.cs324.failover.RestoredJob;
 import com.cs324.failover.proto.CheckpointEntry;
 import com.cs324.failover.proto.HeartbeatReply;
@@ -78,9 +80,9 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     // Set while a new coordinator merges and rebuilds; jobs are refused in that window so a
     // client cannot start the same work twice, once here and once through recovery.
     private final AtomicBoolean failoverInProgress = new AtomicBoolean(false);
-    // Coordinator id and time of the failure we last reacted to, for storm suppression.
-    private final java.util.concurrent.atomic.AtomicReference<String> lastFailure =
-            new java.util.concurrent.atomic.AtomicReference<>();
+    // One election per detected failure; the gate holds the window and the key.
+    private final FailureGate failureGate =
+            new FailureGate(Constants.FAILOVER_SUPPRESSION_MS, System::currentTimeMillis);
 
     // Share one listener for computation, progress and election, preserving term limits and JAC accounting.
     public synchronized void startProgressServer() throws java.io.IOException {
@@ -1166,21 +1168,18 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     }
 
     /**
-     * Reacts to a coordinator this worker has decided is FAILED: jitter first, so survivors do
-     * not wave at the same instant, then one suppressed wave per failure.
+     * Reacts to a coordinator this worker has decided is FAILED: one wave per failure, jittered.
      *
-     * <p>The failure key is time based rather than a wave counter, because the whole point is
-     * that several workers notice the same death within a few hundred milliseconds of each
-     * other and must not each start their own.
+     * <p>The suppression is keyed on (coordinator, when) rather than on a wave counter, because
+     * the whole point is that several workers notice the same death within a few hundred
+     * milliseconds of each other and must not each start their own. Keying on the coordinator
+     * id alone would be wrong in the other direction: the same worker failing again much later
+     * is a new failure and must still be able to elect.
      */
     private void requestFailoverElection(int failedCoordinator) {
-        long now = System.currentTimeMillis();
-        String failure = failedCoordinator + "@" + Constants.FAILOVER_SUPPRESSION_MS;
-        String previous = lastFailure.get();
-        if (failure.equals(previous)) {
+        if (!failureGate.shouldElect(failedCoordinator)) {
             return;
         }
-        lastFailure.set(failure);
         long jitter = Constants.FAILOVER_ELECTION_JITTER_MS <= 0 ? 0
                 : (long) (Math.random() * Constants.FAILOVER_ELECTION_JITTER_MS);
         recordEvent(WorkerEvent.FAILOVER_STARTED, "coordinator Worker " + failedCoordinator
@@ -1196,19 +1195,24 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
         startElection();
     }
 
-    /**
-     * A heartbeat reply showed a generation newer than ours, so the cluster has already moved
-     * on. Adopting that view is cheaper and safer than starting an election of our own, and it
-     * is what makes a deposed coordinator step down instead of serving a term it has lost.
+/**
+     * Acts on a heartbeat reply that contradicts this worker's leadership view: either the peer
+     * reports a newer term, or it says it is not the coordinator any more. Both mean the cluster
+     * has already moved on, so the view is adopted instead of starting an election nobody needs.
+     * That is also what makes a deposed coordinator step down instead of serving a lost term.
      */
-    private void observeLeadershipDrift(long term, int coordinatorView) {
-        if (term <= currentTerm.get() || coordinatorView == -1) {
+    private void observeLeadershipDrift(CoordinatorHealthMonitor.ProbeResult view) {
+        long peerTerm = view.term() == null ? 0L : view.term();
+        LeaderView.Decision decision = LeaderView.decide(currentTerm.get(), currentCoordinatorId,
+                peerTerm, view.coordinatorIdView(), view.isCoordinator());
+        if (!decision.adopt()) {
             return;
         }
         boolean wasCoordinator = currentCoordinatorId == id;
-        if (acceptLeadership(coordinatorView, term, "drift") && wasCoordinator && coordinatorView != id) {
+        if (acceptLeadership(decision.coordinatorId(), decision.term(), "drift")
+                && wasCoordinator && decision.coordinatorId() != id) {
             recordEvent(WorkerEvent.LEADERSHIP_STEP_DOWN, "Worker " + id + " stepped down for Worker "
-                    + coordinatorView + " at term " + term);
+                    + decision.coordinatorId() + " at term " + decision.term());
         }
     }
 

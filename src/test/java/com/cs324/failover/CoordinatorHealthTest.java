@@ -113,7 +113,7 @@ class CoordinatorHealthTest {
                 coordinatorId -> probes.incrementAndGet() <= 2
                         ? new CoordinatorHealthMonitor.ProbeResult(5L, null, 3, true)
                         : null,
-                coordinatorId -> failures.incrementAndGet(), (term, view) -> { }, events::add,
+                coordinatorId -> failures.incrementAndGet(), view -> { }, events::add,
                 3, SLOW_MS, SILENCE_MS);
         try {
             for (int tick = 0; tick < 2; tick++) {
@@ -147,10 +147,10 @@ class CoordinatorHealthTest {
     void theMonitorIgnoresAWorkerThatLeadsItselfOrHasNoLeader() {
         AtomicInteger probes = new AtomicInteger();
         CoordinatorHealthMonitor selfLeader = new CoordinatorHealthMonitor(3, () -> 3,
-                id -> { probes.incrementAndGet(); return null; }, id -> { }, (t, v) -> { },
+                id -> { probes.incrementAndGet(); return null; }, id -> { }, view -> { },
                 message -> { });
         CoordinatorHealthMonitor noLeader = new CoordinatorHealthMonitor(3, () -> -1,
-                id -> { probes.incrementAndGet(); return null; }, id -> { }, (t, v) -> { },
+                id -> { probes.incrementAndGet(); return null; }, id -> { }, view -> { },
                 message -> { });
         try {
             selfLeader.tick();

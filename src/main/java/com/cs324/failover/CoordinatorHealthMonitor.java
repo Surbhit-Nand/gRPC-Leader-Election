@@ -38,7 +38,7 @@ public final class CoordinatorHealthMonitor implements AutoCloseable {
     private final IntSupplier believedCoordinator;
     private final Probe probe;
     private final IntConsumer onFailed;
-    private final BiConsumer<Long, Integer> onLeadershipDrift;
+    private final Consumer<ProbeResult> onLeadershipDrift;
     private final Consumer<String> log;
     private final CoordinatorHealth health;
     private final ScheduledExecutorService timer;
@@ -46,14 +46,14 @@ public final class CoordinatorHealthMonitor implements AutoCloseable {
     private final AtomicBoolean closed = new AtomicBoolean(false);
 
     public CoordinatorHealthMonitor(int selfId, IntSupplier believedCoordinator, Probe probe,
-            IntConsumer onFailed, BiConsumer<Long, Integer> onLeadershipDrift, Consumer<String> log) {
+            IntConsumer onFailed, Consumer<ProbeResult> onLeadershipDrift, Consumer<String> log) {
         this(selfId, believedCoordinator, probe, onFailed, onLeadershipDrift, log,
                 Constants.FAILOVER_HEARTBEAT_FAILURE_THRESHOLD,
                 Constants.FAILOVER_HEARTBEAT_SLOW_MS, Constants.FAILOVER_HEARTBEAT_SILENCE_MS);
     }
 
     public CoordinatorHealthMonitor(int selfId, IntSupplier believedCoordinator, Probe probe,
-            IntConsumer onFailed, BiConsumer<Long, Integer> onLeadershipDrift, Consumer<String> log,
+            IntConsumer onFailed, Consumer<ProbeResult> onLeadershipDrift, Consumer<String> log,
             int failureThreshold, long slowThresholdMillis, long silenceWindowMillis) {
         this.selfId = selfId;
         this.believedCoordinator = believedCoordinator;
@@ -150,13 +150,14 @@ public final class CoordinatorHealthMonitor implements AutoCloseable {
     }
 
     /**
-     * A reply can also show that the peer we are probing is not the coordinator any more. A
-     * higher term, or a peer that says it is not the coordinator, means the cluster has moved
-     * on and this worker should re-discover rather than start an election of its own.
+     * A reply also carries the responder's own view, and that view can contradict what this
+     * worker believes: the peer it is probing may say it is not the coordinator any more, or may
+     * report a newer generation. Both mean the cluster has moved on, and the cheap correct
+     * action is to adopt that view rather than start an election nobody needs.
      */
     private void observeLeadership(int coordinator, ProbeResult result) {
         if (result.term() != null && result.term() > 0) {
-            onLeadershipDrift.accept(result.term(), result.coordinatorIdView());
+            onLeadershipDrift.accept(result);
         }
     }
 

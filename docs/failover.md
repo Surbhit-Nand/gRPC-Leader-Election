@@ -163,9 +163,11 @@ asserts this arithmetic stays inside the documented window rather than drifting 
 The monitor fires `onFailed` only on the transition into `FAILED`. The reaction is
 `requestFailoverElection`, which:
 
-1. **suppresses duplicates** - the same coordinator failing again inside
+1. **suppresses duplicates** through `FailureGate` - the same coordinator failing again inside
    `FAILOVER_SUPPRESSION_MS` is ignored, so N survivors noticing the same death produce one
-   wave rather than N;
+   wave rather than N. The gate is keyed on (coordinator, when), not on the coordinator alone:
+   keying on the id would suppress a *second, unrelated* death of the same worker id for ever,
+   leaving the cluster with a dead coordinator and no election to replace it;
 2. **jitters** by up to `FAILOVER_ELECTION_JITTER_MS` before starting, so the survivors' waves do
    not leave the cluster at exactly the same instant;
 3. then calls the ordinary `startElection()`, so the election itself is unchanged code.
@@ -178,10 +180,21 @@ this path: a person asking for an election always gets one.
 Each announcement carries a **term**, and the root announces `max(known term) + 1`
 (`docs/election.md`). A worker applies a term-bearing announcement only when
 `(term, coordinator_id)` is not older than the pair it holds, ties going to the higher tuple.
-Combined with the heartbeat reply, a coordinator that comes back after being replaced learns the
-higher term from a peer, adopts the new leader (`LEADERSHIP_STEP_DOWN`) and stops admitting
-jobs, instead of reclaiming a term it has lost. A worker that receives an older announcement
-drops it, so a late wave cannot undo a newer election.
+
+The heartbeat reply lets the same rule be applied to what a *peer reports* about leadership, and
+`LeaderView.decide` is that rule in one testable place:
+
+| The responder reports | Action | Why |
+| --- | --- | --- |
+| a newer `term` | adopt its view | a newer election has already concluded |
+| the same term, but `is_coordinator=false` naming someone else | adopt its view | the worker we thought was leading has already stood down |
+| an older `term` | ignore | a deposed coordinator must not pull the cluster back |
+| the same coordinator we already hold | ignore | agreement, not a contradiction |
+
+So a coordinator that comes back after being replaced learns the higher term from a peer, adopts
+the new leader (`LEADERSHIP_STEP_DOWN`) and stops admitting jobs, instead of reclaiming a term it
+has lost. A worker that receives an older announcement drops it, so a late wave cannot undo a
+newer election.
 
 ---
 
@@ -360,6 +373,10 @@ Every judgement call made along the way, and why.
     known peer states instead of a live cluster.
 16. **New `WorkerEvent` constants only.** No GUI file was edited; the client owner may want to
     add colours.
+17. **Two rules were extracted rather than left inline in the shared worker file**, so they could
+    be tested without a cluster: `FailureGate` (one election per failure) and `LeaderView`
+    (whether a peer's reported leadership replaces ours). Both were written first as private
+    logic in `WorkerRemoteImpl`, and reviewing them found two real defects - see section 9.
 
 ---
 
@@ -389,5 +406,43 @@ Stated plainly, because a demo will find them.
 7. **`getRecentEvents` overflow is silent**, as it already was before this work: a client that
    falls more than 64 events behind on one worker misses the prefix.
 8. **No disk persistence**, by choice (section 5). A whole-machine restart loses running jobs.
+9. **A graceful shutdown during a running job can deliver an error to the client.** The worker
+   closes its job service while slices are still in flight, a pending slice recovery is rejected
+   by the closing thread pool, and the job fails with an internal message such as "Recovery could
+   not start". A *crashed* process cannot do this, so the demo's crash path is unaffected, but a
+   `Ctrl+C` during a job can show it. The clean message would be a small change in the job
+   service's shutdown handling and belongs to that file's owner; it is listed here rather than
+   fixed, to keep the shared-file diff small.
 9. **The legacy RMI election path is still reachable** for a worker that never publishes a gRPC
-   endpoint. It is a fallback for a pre-migration cluster, not a second supported mode.
+    endpoint. It is a fallback for a pre-migration cluster, not a second supported mode.
+10. **One best-effort RMI read remains in the wave path**: the first wave from a new neighbour
+    seeds the 2-hop repair cache by asking that peer for its neighbour list. It is topology, not
+    protocol - it is seeded at connect time anyway, and `GrpcElectionTest` converges with the RMI
+    registry stopped entirely, which is what shows the protocol itself is gRPC-only. It will go
+    when peer links migrate.
+
+---
+
+## 9. Defects found by reviewing this work
+
+Recorded because the first version of this work passed its own tests and was still wrong in
+these ways. Each now has a test that fails without the fix.
+
+1. **Storm suppression never expired.** The suppression key was `coordinatorId + "@" +
+   FAILOVER_SUPPRESSION_MS` - a constant, not a timestamp - so the *same* worker failing again
+   was suppressed permanently. Killing one worker, restarting it, and killing it again would have
+   left the cluster with a dead coordinator and no election. `FailureGate` keys on
+   (coordinator, when) and is unit-tested with an injected clock.
+2. **The `is_coordinator=false` case was documented but not implemented.** Only a newer term
+   triggered re-discovery, so the "the coordinator I am probing says it is not the coordinator"
+   signal - which the report explicitly claims - was being read and thrown away.
+   `LeaderView.decide` now implements it and is unit-tested.
+3. **`getProgressPort()` threw after shutdown**, failing any dispatch that raced a teardown.
+   Caught by the end-to-end test.
+4. **Replication stopped at the first peer that acknowledged**, so peers that missed the
+   acceptance could never fold a later delta and were permanently unable to take that job over.
+5. **A checkpoint snapshot named the serving replica as the job's coordinator**, making every
+   replicated job look abandoned and letting a new leader steal a job its live owner was still
+   finishing.
+6. **The takeover trusted the directory as proof of life.** A crashed worker stays registered
+   until it exits, so recovery had to learn liveness from the takeover fetch instead.
