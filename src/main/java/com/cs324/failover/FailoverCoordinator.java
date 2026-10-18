@@ -187,7 +187,7 @@ public final class FailoverCoordinator {
             slices.add(new RestoredJob.RestoredSlice(slice.taskId(), slice.input(), slice.owner(),
                     slice.attempt(), slice.result()));
         }
-        return new RestoredJob(job.request(), slices, job.delivered());
+        return new RestoredJob(job.request(), slices, job.delivered(), job.finalResult());
     }
 
     /**

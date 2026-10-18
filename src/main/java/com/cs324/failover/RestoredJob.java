@@ -15,7 +15,12 @@ import java.util.List;
  * result come back with it, which is what keeps recovery from recomputing finished work -
  * and therefore from adding a PRIMESUM twice.
  */
-public record RestoredJob(SubmitJobRequest request, List<RestoredSlice> slices, boolean delivered) {
+public record RestoredJob(SubmitJobRequest request, List<RestoredSlice> slices, boolean delivered,
+        TaskResult finalResult) {
+
+    public RestoredJob(SubmitJobRequest request, List<RestoredSlice> slices, boolean delivered) {
+        this(request, slices, delivered, null);
+    }
 
     public RestoredJob {
         if (request == null) {

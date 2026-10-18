@@ -341,6 +341,30 @@ private Object awaitResult(int jobId) throws Exception {
     }
 
     @Test
+    void finishedCheckpointReplaysTheAggregateRatherThanOneSlice() throws Exception {
+        WorkerRemoteImpl survivor = addWorker(2);
+        int jobId = 41;
+        answers.put(jobId, new CompletableFuture<>());
+        SubmitJobRequest request = SubmitJobRequest.newBuilder().setJobId(jobId).setJobType("PRIMESUM")
+                .setPayload(ComputationCodec.encode(new WorkerTaskCalculator.PrimeRange(1, 10)))
+                .setClient(ClientEndpoint.newBuilder().setHost("localhost").setPort(clientPort)).build();
+        CheckpointLog log = survivor.checkpointLog();
+        var owner = com.cs324.registry.proto.WorkerEndpoint.newBuilder().setWorkerId(1).build();
+        log.apply(log.acceptedEntry(request, List.of(
+                new CheckpointSink.SliceSnapshot(1, ComputationCodec.encode(new WorkerTaskCalculator.PrimeRange(1, 5)), owner, 1),
+                new CheckpointSink.SliceSnapshot(2, ComputationCodec.encode(new WorkerTaskCalculator.PrimeRange(6, 10)), owner, 1)),
+                System.currentTimeMillis(), 1, 1));
+        log.apply(log.sliceEntry(jobId, 1, null, 1,
+                TaskResult.newBuilder().setJobId(jobId).setLongResult(10L).build(), 1, 1));
+        log.apply(log.sliceEntry(jobId, 2, null, 1,
+                TaskResult.newBuilder().setJobId(jobId).setLongResult(7L).build(), 1, 1));
+        log.apply(log.finishedEntry(jobId,
+                TaskResult.newBuilder().setJobId(jobId).setLongResult(17L).build(), false, 1, 1));
+        survivor.startElection();
+        assertEquals(17L, answers.get(jobId).get(5, TimeUnit.SECONDS));
+    }
+
+    @Test
     void killingTheCoordinatorMidJobElectsAReplacementThatFinishesTheJobExactlyOnce() throws Exception {
         addWorker(1);
         addWorker(2);

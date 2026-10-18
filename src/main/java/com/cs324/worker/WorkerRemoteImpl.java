@@ -137,24 +137,13 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
         replicator = new CheckpointReplicator(id, grpcDirectory, executor, this::logFailover);
         failover = new FailoverCoordinator(id, checkpoints, replicator,
                 (job, remainingMillis) -> grpcJobs != null && grpcJobs.restore(job, remainingMillis),
-                job -> grpcJobs != null && grpcJobs.deliverResult(job.request(), tombstoneResult(job)),
+                job -> grpcJobs != null && grpcJobs.deliverResult(job.request(), job.finalResult()),
                 currentTerm::get, java.time.Duration.ofMinutes(10).toMillis(), this::logFailover);
         probe = new GrpcCoordinatorProbe(id, grpcDirectory, currentTerm::get,
                 () -> currentCoordinatorId, this::logFailover);
         healthMonitor = new CoordinatorHealthMonitor(id, () -> currentCoordinatorId, probe,
                 this::requestFailoverElection, this::observeLeadershipDrift, this::logFailover);
         healthMonitor.start();
-    }
-
-    private TaskResult tombstoneResult(RestoredJob job) {
-        for (RestoredJob.RestoredSlice slice : job.slices()) {
-            if (slice.result() != null) {
-                return slice.result();
-            }
-        }
-        // A finished job whose result no slice carries: nothing useful left to replay.
-        return com.cs324.job.proto.TaskResult.newBuilder().setJobId(job.jobId())
-                .setWorkerId(id).setError("Result unavailable after coordinator failure").build();
     }
 
     // Failover bookkeeping is operational detail; the feed keeps it, stdout stays clean.

@@ -24,3 +24,11 @@ waiting until its deadline. The regression
 failed before the fix: expected `17`, received `Job timed out waiting for worker results`.
 Dispatch now checks for aggregate completion, sharing the normal completion path.
 The test also checks no remote assignments, finished progress and active-job cleanup.
+
+## Finished-result replay
+
+**High severity:** `WorkerRemoteImpl.tombstoneResult` returned the first slice
+result, discarding the final aggregate (and potentially a saved error). A real
+gRPC regression seeded a finished checkpoint and elected the survivor: expected
+`17`, received `10`. `RestoredJob` now carries the saved final `TaskResult` through
+the takeover to the client callback without deriving it from partial results.
