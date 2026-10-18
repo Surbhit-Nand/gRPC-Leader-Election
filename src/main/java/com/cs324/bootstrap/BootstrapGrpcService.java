@@ -67,10 +67,9 @@ public class BootstrapGrpcService extends RegistryServiceGrpc.RegistryServiceImp
         } catch (IllegalArgumentException e) {
             responseObserver.onError(Status.INVALID_ARGUMENT.withDescription(e.getMessage()).asRuntimeException());
         } catch (DuplicateWorkerIdException e) {
+            // DuplicateWorkerIdException is the only RemoteException subtype the
+            // registry throws here, so it is the specific catch, not the generic one.
             responseObserver.onError(Status.ALREADY_EXISTS
-                    .withDescription(e.getMessage()).asRuntimeException());
-        } catch (RemoteException e) {
-            responseObserver.onError(Status.INTERNAL
                     .withDescription(e.getMessage()).asRuntimeException());
         }
     }
