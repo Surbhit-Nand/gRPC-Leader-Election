@@ -72,7 +72,7 @@ public final class FailoverCoordinator {
      *
      * @return the number of jobs rebuilt in this pass.
      */
-    public int takeOver() {
+    public synchronized int takeOver() {
         long term = Math.max(currentTerm.getAsLong(), 1L);
         events.accept(WorkerEvent.FAILOVER_STARTED + ": merging replicated job state at term " + term);
         Set<Integer> live = merge();
@@ -133,8 +133,11 @@ public final class FailoverCoordinator {
                 // safe: the client receiver already ignores a second result for the same job.
                 events.accept("job " + jobId + " finished before the failure without a confirmed"
                         + " client delivery; replaying the result");
-                deliverer.deliver(toRestoredJob(job));
-                log.markDelivered(jobId, true);
+                if (deliverer.deliver(toRestoredJob(job))) {
+                    log.markDelivered(jobId, true);
+                } else {
+                    takenOver.remove(jobId + "@" + term);
+                }
             }
             return false;
         }

@@ -214,6 +214,21 @@ class FailoverCoordinatorTest {
     }
 
     @Test
+    void failedReplayRemainsUndeliveredAndCanBeRetried() {
+        CheckpointLog log = replicaOf(1, 1);
+        log.apply(log.finishedEntry(1, TaskResult.newBuilder().setJobId(1).setLongResult(1060L).build(), false, 1, 1));
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        FailoverCoordinator coordinator = new FailoverCoordinator(SELF, log, new FakeSource(),
+                (job, remaining) -> false, job -> calls.incrementAndGet() > 1,
+                () -> TERM, 600_000L, events::add);
+        coordinator.takeOver();
+        assertFalse(log.job(1).delivered(), "an attempted callback is not an acknowledgement");
+        coordinator.takeOver();
+        assertTrue(log.job(1).delivered());
+        assertEquals(2, calls.get());
+    }
+
+    @Test
     void takeoverMergesEveryReplicaBeforeDeciding() {
         // Two peers disagree: one has seen slice 2 finished, the other has not. The merge is
         // what stops the decision being made on the stale view alone.

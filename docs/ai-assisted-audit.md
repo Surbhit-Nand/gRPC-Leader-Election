@@ -32,3 +32,13 @@ result, discarding the final aggregate (and potentially a saved error). A real
 gRPC regression seeded a finished checkpoint and elected the survivor: expected
 `17`, received `10`. `RestoredJob` now carries the saved final `TaskResult` through
 the takeover to the client callback without deriving it from partial results.
+
+## Replay acknowledgement
+
+**High severity:** takeover marked a job delivered even when its deliverer returned
+false; the gRPC deliverer itself returned true before the callback completed.
+The regression `failedReplayRemainsUndeliveredAndCanBeRetried` failed on the original
+code. Replay now waits for a bounded gRPC acknowledgement and retains failed
+deliveries for a later takeover pass. `replayReportsFailureUntilClientAcknowledges`
+also exercises a real rejecting callback and a successful callback. Takeover passes
+are serialized so their idempotence set is safe under concurrent triggers.

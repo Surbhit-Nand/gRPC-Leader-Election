@@ -475,18 +475,22 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
 
     /** Sends one already-computed result to its client, used when replaying a tombstone. */
     public boolean deliverResult(SubmitJobRequest request, TaskResult result) {
+        ManagedChannel channel = null;
         try {
             ClientEndpoint client = request.getClient();
             endpoint(client.getHost(), client.getPort());
-            GrpcJobService.this.<DeliverResultAck>send(client.getHost(), client.getPort(), (channel, observer) ->
-                    ClientServiceGrpc.newStub(channel).withDeadlineAfter(10, TimeUnit.SECONDS)
-                            .deliverResult(result, observer),
-                    error -> System.err.println("Cannot replay job " + request.getJobId()
-                            + " result to its client: " + error));
+            channel = ManagedChannelBuilder.forAddress(client.getHost(), client.getPort()).usePlaintext().build();
+            channels.add(channel);
+            // Takeover runs on the worker pool. Only a received acknowledgement proves
+            // delivery; scheduling an asynchronous RPC does not.
+            ClientServiceGrpc.newBlockingStub(channel).withDeadlineAfter(10, TimeUnit.SECONDS)
+                    .deliverResult(result);
             return true;
         } catch (RuntimeException e) {
             System.err.println("Cannot replay job result: " + e.getMessage());
             return false;
+        } finally {
+            if (channel != null) { channels.remove(channel); channel.shutdownNow(); }
         }
     }
 

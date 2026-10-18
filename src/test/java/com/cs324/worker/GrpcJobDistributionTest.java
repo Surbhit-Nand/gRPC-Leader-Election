@@ -165,4 +165,19 @@ class GrpcJobDistributionTest {
         assertTrue(progress(request.getJobId()).getFinished());
         assertFalse(services.get(0).coordinatedJobIds().contains(request.getJobId()));
     }
+
+    @Test void replayReportsFailureUntilClientAcknowledges() throws Exception {
+        Server rejecting = ServerBuilder.forPort(0).addService(new ClientServiceGrpc.ClientServiceImplBase() {
+            @Override public void deliverResult(TaskResult result, io.grpc.stub.StreamObserver<DeliverResultAck> reply) {
+                reply.onError(Status.UNAVAILABLE.asRuntimeException());
+            }
+        }).build().start();
+        servers.add(rejecting);
+        SubmitJobRequest request = request("MAX", new int[]{17});
+        TaskResult result = TaskResult.newBuilder().setJobId(request.getJobId()).setIntResult(17).build();
+        assertFalse(services.get(0).deliverResult(request.toBuilder().setClient(request.getClient().toBuilder()
+                .setPort(rejecting.getPort())).build(), result));
+        assertTrue(services.get(0).deliverResult(request, result));
+        assertEquals(17, results.get(request.getJobId()).get(1, TimeUnit.SECONDS));
+    }
 }
