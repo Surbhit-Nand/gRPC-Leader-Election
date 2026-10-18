@@ -52,6 +52,34 @@
                 </configuration>
                 <executions><execution><goals><goal>compile</goal><goal>compile-custom</goal></goals></execution></executions>
             </plugin>
+            <!--
+                Register the protobuf/grpc-stub output as compile sources. The
+                protobuf plugin adds these roots at runtime, but the VS Code /
+                Eclipse Java language server (m2e) does not always pick up
+                runtime source roots, which surfaced as
+                "cannot find symbol ... package com.cs324.registry.proto".
+                build-helper:add-source is a well-known goal that m2e maps out of
+                the box, so the IDE resolves the generated classes. Declared after
+                the protobuf plugin so the directories exist when this runs.
+            -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <id>add-protobuf-sources</id>
+                        <phase>generate-sources</phase>
+                        <goals><goal>add-source</goal></goals>
+                        <configuration>
+                            <sources>
+                                <source>${project.build.directory}/generated-sources/protobuf/java</source>
+                                <source>${project.build.directory}/generated-sources/protobuf/grpc-java</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>exec-maven-plugin</artifactId>
