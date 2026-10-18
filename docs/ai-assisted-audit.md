@@ -42,3 +42,10 @@ code. Replay now waits for a bounded gRPC acknowledgement and retains failed
 deliveries for a later takeover pass. `replayReportsFailureUntilClientAcknowledges`
 also exercises a real rejecting callback and a successful callback. Takeover passes
 are serialized so their idempotence set is safe under concurrent triggers.
+
+## Progress after partial failure
+
+**Medium severity:** a worker may own several slices after reassignment. Marking
+an unfinished slice failed reset that worker's previously completed units to zero.
+The real streaming regression in `JobProgressStreamingTest` reproduced `3 -> 0`.
+Failed work now preserves completed units while changing the worker status to Failed.
