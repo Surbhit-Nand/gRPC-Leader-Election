@@ -23,10 +23,26 @@
         </dependency>
     </dependencies>
     <build>
-        <extensions>
-            <extension><groupId>kr.motd.maven</groupId><artifactId>os-maven-plugin</artifactId><version>1.7.1</version></extension>
-        </extensions>
         <plugins>
+            <!--
+                os-maven-plugin runs as a lifecycle plugin, not a build <extension>.
+                m2e (the engine behind the VS Code / Eclipse Java language server) does
+                not evaluate build extensions, so as an <extension>
+                ${os.detected.classifier} stayed literal and the protobuf plugin failed
+                with "Unable to resolve artifact: com.google.protobuf:protoc:exe:${os.detected.classifier}".
+                Bound to initialize, detect runs before protobuf:compile in
+                generate-sources for both the CLI and m2e, so the classifier resolves.
+            -->
+            <plugin>
+                <groupId>kr.motd.maven</groupId><artifactId>os-maven-plugin</artifactId><version>1.7.1</version>
+                <executions>
+                    <execution>
+                        <id>detect-os</id>
+                        <phase>initialize</phase>
+                        <goals><goal>detect</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.xolstice.maven.plugins</groupId><artifactId>protobuf-maven-plugin</artifactId><version>0.6.1</version>
                 <configuration>
