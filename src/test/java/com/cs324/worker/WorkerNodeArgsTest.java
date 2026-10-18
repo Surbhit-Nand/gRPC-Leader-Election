@@ -116,20 +116,17 @@ class WorkerNodeArgsTest {
     }
 
     @Test
-    void plainFormsDefaultToRmiRegistration() {
-        assertTrue(!WorkerNode.parseArgs(new String[0]).grpc());
-        assertTrue(!WorkerNode.parseArgs(new String[]{"myhost", "2099"}).grpc());
+    void plainFormsUseGrpcRegistration() {
+        assertTrue(WorkerNode.parseArgs(new String[0]).grpc());
+        assertTrue(WorkerNode.parseArgs(new String[]{"myhost", "2099"}).grpc());
     }
 
     @Test
-    void freePortScanBindsBaseThenNext() throws Exception {
-        int base = 47200;
-        WorkerNode.LocalRegistry first = WorkerNode.createRegistryOnFreePort(base, 50);
-        created.add(first.registry());
-        assertEquals(base, first.port());
-
-        WorkerNode.LocalRegistry second = WorkerNode.createRegistryOnFreePort(base, 50);
-        created.add(second.registry());
-        assertEquals(base + 1, second.port(), "second scan must skip the taken base port");
+    void deployedWorkerDoesNotExportAnRmiObject() throws Exception {
+        WorkerRemoteImpl worker = new WorkerRemoteImpl(1, false);
+        try {
+            assertThrows(java.rmi.NoSuchObjectException.class,
+                    () -> java.rmi.server.RemoteObject.toStub(worker));
+        } finally { worker.shutdown(); }
     }
 }

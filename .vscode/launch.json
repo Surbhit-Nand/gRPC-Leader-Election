@@ -4,7 +4,7 @@
         {
             "type": "jdk",
             "request": "launch",
-            "name": "Bootstrap Node (port 1099)",
+            "name": "Bootstrap Node (gRPC port 50051)",
             "mainClass": "com.cs324.bootstrap.BootstrapNode",
             "args": "1099",
             "console": "internalConsole"

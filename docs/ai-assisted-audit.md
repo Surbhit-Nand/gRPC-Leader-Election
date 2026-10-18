@@ -49,3 +49,25 @@ are serialized so their idempotence set is safe under concurrent triggers.
 an unfinished slice failed reset that worker's previously completed units to zero.
 The real streaming regression in `JobProgressStreamingTest` reproduced `3 -> 0`.
 Failed work now preserves completed units while changing the worker status to Failed.
+
+## All-gRPC executable paths
+
+**High severity / assignment compliance:** WorkerNode looked up BootstrapRegistry
+over RMI before its `--grpc` branch; bootstrap peer selection, joining, repair and
+ClientApp monitoring also made RMI calls. The actual worker process exited with
+`Connection refused` against a gRPC-only bootstrap in `GrpcOnlyClusterTest`.
+
+`control.proto`, `WorkerControlService` and `GrpcWorkerClient` carry topology and
+status/events as typed protobuf messages. RegistryClient also adapts the historical
+local directory interface to gRPC. Bootstrap gRPC registration makes no peer
+network calls under its registration lock; joiners probe published endpoints with
+deadlines. WorkerNode publishes its listener, refreshes membership, joins via gRPC
+and adopts the peer's leadership term. The executable bootstrap and workers no
+longer export RMI objects. Old constructors and RmiElectionTransport remain for
+legacy regression fixtures, and are not selected by the application entry points.
+Legacy positional contact ports remain accepted but unused; `--grpc-port` and the
+documented bootstrap/client gRPC port arguments select the actual endpoints.
+
+Verification includes actual worker JVMs, a bootstrap with no exported RMI object,
+dynamic joins, gRPC monitoring, a forcibly terminated coordinator, correct recovered
+PRIMESUM and completed progress. The historical regression suite is retained.

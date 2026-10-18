@@ -12,8 +12,6 @@ import java.awt.*;
 import java.io.File;
 import java.io.IOException;
 import java.rmi.RemoteException;
-import java.rmi.registry.LocateRegistry;
-import java.rmi.registry.Registry;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -29,11 +27,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static com.cs324.client.ClientStyle.*;
 
 // Swing client: prepares input, submits to the current coordinator, then shows the result.
-// Arguments are optional: ClientApp [bootstrapHost] [bootstrapPort] [clientRmiPort].
+// Arguments: [bootstrapHost] [legacyUnusedPort] [callbackPort] [bootstrapGrpcPort].
 public class ClientApp extends JFrame {
 
     // Colours, rounded panels and icons come from ClientStyle via the static import above.
-    // Bootstrap endpoint, plus the RMI port the coordinator calls our results back on.
+    // Bootstrap endpoint, plus this client's gRPC callback port.
     private final String bootstrapHost;
     private final int bootstrapPort;
     private final int clientPort;
@@ -542,9 +540,7 @@ public class ClientApp extends JFrame {
                 ClusterMonitor.PollResult result = ClusterMonitor.pollWithEvents(bootstrap,
                         (workerId, address) -> {
                             try {
-                                Registry registry = LocateRegistry.getRegistry(
-                                        address.getRmiHost(), address.getRmiPort());
-                                return (WorkerRemote) registry.lookup("Worker" + workerId);
+                                return lookupWorker(workerId, address);
                             } catch (Exception e) {
                                 return null;
                             }
@@ -709,8 +705,7 @@ public class ClientApp extends JFrame {
         }
         if (grpcDirectory == null) grpcDirectory = new com.cs324.computation.RegistryClient(bootstrapHost, bootstrapGrpcPort);
         if (bootstrap == null) {
-            Registry bootstrapRegistry = LocateRegistry.getRegistry(bootstrapHost, bootstrapPort);
-            bootstrap = (BootstrapRemote) bootstrapRegistry.lookup("BootstrapRegistry");
+            bootstrap = grpcDirectory;
         }
     }
 
@@ -765,8 +760,9 @@ public class ClientApp extends JFrame {
     private WorkerRemote lookupWorker(int workerId, WorkerAddress address) {
         // A worker can die between the directory listing and the lookup; that is not fatal.
         try {
-            Registry registry = LocateRegistry.getRegistry(address.getRmiHost(), address.getRmiPort());
-            return (WorkerRemote) registry.lookup("Worker" + workerId);
+            var worker = new com.cs324.computation.GrpcWorkerClient(grpcDirectory.worker(workerId));
+            worker.ping();
+            return worker;
         } catch (Exception e) {
             return null;
         }

@@ -20,7 +20,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 // Active-worker directory plus a job-id counter; it never takes part in elections.
-public class BootstrapRegistryImpl extends UnicastRemoteObject implements BootstrapRemote {
+public class BootstrapRegistryImpl implements BootstrapRemote {
 
     // Concurrent: workers register and deregister in parallel.
     private final Map<Integer, WorkerAddress> activeWorkers = new ConcurrentHashMap<>();
@@ -42,7 +42,12 @@ public class BootstrapRegistryImpl extends UnicastRemoteObject implements Bootst
     }
 
     public BootstrapRegistryImpl() throws RemoteException {
-        super();
+        this(true);
+    }
+
+    /** Legacy tests may export RMI; the deployed bootstrap explicitly disables it. */
+    public BootstrapRegistryImpl(boolean exportLegacyRmi) throws RemoteException {
+        if (exportLegacyRmi) UnicastRemoteObject.exportObject(this, 0);
     }
 
     @Override
@@ -61,6 +66,22 @@ public class BootstrapRegistryImpl extends UnicastRemoteObject implements Bootst
     // Registration result as data, without RMI stubs: the backing call for the
     // gRPC service. peerId/peerAddress are null when this worker is first.
     record RegistrationRecord(int workerId, Integer peerId, WorkerAddress peerAddress) {}
+
+    // gRPC registration is a directory operation only. No network calls under its
+    // lock: joiners probe ready endpoints themselves, with bounded gRPC deadlines.
+    synchronized RegistrationRecord registerGrpcRecord(int requestedId, boolean auto, String host, int port) throws DuplicateWorkerIdException {
+        if (host.isBlank() || port < 0 || port > 65535 || (!auto && requestedId < 1))
+            throw new IllegalArgumentException("Valid host, port and positive worker ID required");
+        int workerId = auto ? nextWorkerId.getAndIncrement() : requestedId;
+        List<Map.Entry<Integer, WorkerAddress>> peers = new ArrayList<>(activeWorkers.entrySet());
+        Collections.shuffle(peers);
+        if (activeWorkers.putIfAbsent(workerId, new WorkerAddress(host, port)) != null)
+            throw new DuplicateWorkerIdException(workerId);
+        nextWorkerId.updateAndGet(cur -> Math.max(cur, workerId + 1));
+        return peers.stream().filter(e -> e.getValue().getGrpcPort() > 0).findFirst()
+                .map(e -> new RegistrationRecord(workerId, e.getKey(), e.getValue()))
+                .orElse(new RegistrationRecord(workerId, null, null));
+    }
 
     @Override
     public List<Integer> getAllocatedWorkerIds() throws RemoteException {

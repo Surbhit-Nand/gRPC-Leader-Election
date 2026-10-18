@@ -54,7 +54,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemote, ElectionHandler, FailoverHandler {
+public class WorkerRemoteImpl implements WorkerRemote, ElectionHandler, FailoverHandler {
+    private final boolean grpcOnly;
     private final com.cs324.progress.ProgressService progress = new com.cs324.progress.ProgressService();
     private io.grpc.Server progressServer;
     private volatile int grpcPort = -1;
@@ -106,6 +107,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
                     }, this::maybeRotateCoordinator, executor, progress, java.time.Duration.ofMinutes(10), this::recordEvent);
             grpcJobs.setCheckpointSink(new ReplicatingCheckpointSink());
             progressServer = io.grpc.ServerBuilder.forPort(0).addService(progress).addService(grpcJobs)
+                    .addService(new com.cs324.computation.WorkerControlService(this))
                     .addService(new ElectionGrpcService(this))
                     .addService(new FailoverGrpcService(this, id)).build().start();
             // Remember the port: gRPC refuses getPort() once the server is down, and this is
@@ -280,9 +282,15 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     private final AtomicBoolean handoverInProgress = new AtomicBoolean(false);
 
     public WorkerRemoteImpl(int id) throws RemoteException {
-        super();
+        this(id, true);
+    }
+
+    /** RMI export exists only for historical regression fixtures, never WorkerNode. */
+    public WorkerRemoteImpl(int id, boolean exportLegacyRmi) throws RemoteException {
         this.id = id;
+        this.grpcOnly = !exportLegacyRmi;
         this.checkpoints = new CheckpointLog(id);
+        if (exportLegacyRmi) UnicastRemoteObject.exportObject(this, 0);
     }
 
     @Override
@@ -660,6 +668,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     @Override
     // Adds a peer by looking up its registry stub; also used for the reverse edge.
     public void connectAsNeighbour(int newWorker, String rmiHost, int rmiPort) throws RemoteException {
+        if (grpcOnly) { connectGrpcNeighbour(newWorker); return; }
         try {
             Registry registry = LocateRegistry.getRegistry(rmiHost, rmiPort);
             WorkerRemote stub = (WorkerRemote) registry.lookup("Worker" + newWorker);
@@ -670,6 +679,21 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
         } catch (NotBoundException e) {
             throw new RemoteException("Failed to look up new neighbour", e);
         }
+    }
+
+    public void connectGrpcNeighbour(int peerId) throws RemoteException {
+        if (peerId == id) return;
+        if (grpcDirectory == null) throw new RemoteException("gRPC discovery is not ready");
+        var peer = new com.cs324.computation.GrpcWorkerClient(grpcDirectory.worker(peerId));
+        var status = peer.status();
+        if (status.getWorkerId() != peerId) throw new RemoteException("Peer identity mismatch");
+        neighbours.put(peerId, peer);
+        twoHop.put(peerId, Set.copyOf(status.getNeighbourIdsList()));
+        recordEvent(WorkerEvent.NEIGHBOUR_ADDED, "linked Worker " + peerId + " via gRPC");
+    }
+
+    public void adoptGrpcCoordinator(int coordinatorId, long term) {
+        if (coordinatorId > 0) acceptLeadership(coordinatorId, term, "adopted");
     }
 
     @Override
@@ -760,8 +784,14 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
             if (address == null) {
                 return false;
             }
-            Registry registry = LocateRegistry.getRegistry(address.getRmiHost(), address.getRmiPort());
-            WorkerRemote stub = (WorkerRemote) registry.lookup("Worker" + candidate);
+            WorkerRemote stub;
+            if (grpcOnly) {
+                stub = new com.cs324.computation.GrpcWorkerClient(grpcDirectory.worker(candidate));
+                stub.ping();
+            } else {
+                Registry registry = LocateRegistry.getRegistry(address.getRmiHost(), address.getRmiPort());
+                stub = (WorkerRemote) registry.lookup("Worker" + candidate);
+            }
             neighbours.put(candidate, stub);
             refreshTwoHop(candidate, stub);
             recordEvent(WorkerEvent.NEIGHBOUR_ADDED,
