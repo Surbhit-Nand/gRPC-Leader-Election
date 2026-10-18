@@ -54,7 +54,7 @@ public final class CheckpointLog {
      * @return true when the entry advanced this replica, false when it was stale, duplicated,
      *         or belonged to an older term.
      */
-    public boolean apply(CheckpointEntry entry) {
+    public synchronized boolean apply(CheckpointEntry entry) {
         int jobId = entry.getJobId();
         if (jobId < 1 || entry.getEntryCase() == CheckpointEntry.EntryCase.ENTRY_NOT_SET) {
             return false;
@@ -102,18 +102,19 @@ public final class CheckpointLog {
     }
 
     /** Every job this replica can still rebuild: unfinished, or finished but undelivered. */
-    public Collection<JobCheckpoint> recoverable() {
+    public synchronized Collection<JobCheckpoint> recoverable() {
         List<JobCheckpoint> recoverable = new ArrayList<>();
         for (JobCheckpoint job : jobs.values()) {
             if (!job.finished() || !job.delivered()) {
-                recoverable.add(job);
+                recoverable.add(job.copy());
             }
         }
         return recoverable;
     }
 
-    public JobCheckpoint job(int jobId) {
-        return jobs.get(jobId);
+    public synchronized JobCheckpoint job(int jobId) {
+        JobCheckpoint job = jobs.get(jobId);
+        return job == null ? null : job.copy();
     }
 
     public int size() {
@@ -121,7 +122,7 @@ public final class CheckpointLog {
     }
 
     /** Next sequence for a job this replica coordinates: strictly above everything folded in. */
-    public long nextSequence(int jobId) {
+    public synchronized long nextSequence(int jobId) {
         JobCheckpoint job = jobs.get(jobId);
         return job == null ? 1L : job.sequence() + 1;
     }
@@ -188,7 +189,7 @@ public final class CheckpointLog {
      * serving them. A survivor decides whether to rebuild a job from that id, so a snapshot
      * that renamed the owner would make every job look abandoned.
      */
-    public List<CheckpointEntry> snapshot(int jobId) {
+    public synchronized List<CheckpointEntry> snapshot(int jobId) {
         JobCheckpoint job = jobs.get(jobId);
         if (job == null) {
             return List.of();
@@ -221,7 +222,7 @@ public final class CheckpointLog {
     }
 
     /** Marks a job's client callback as acknowledged, so a later takeover will not replay it. */
-    public void markDelivered(int jobId, boolean delivered) {
+    public synchronized void markDelivered(int jobId, boolean delivered) {
         JobCheckpoint job = jobs.get(jobId);
         if (job != null) {
             job.markDelivered(delivered);

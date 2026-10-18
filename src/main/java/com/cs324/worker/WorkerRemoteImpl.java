@@ -1272,29 +1272,28 @@ public class WorkerRemoteImpl implements WorkerRemote, ElectionHandler, Failover
         @Override
         public void onAccepted(com.cs324.job.proto.SubmitJobRequest request,
                 List<SliceSnapshot> slices, long acceptedAtMillis) {
-            CheckpointEntry entry = checkpoints.acceptedEntry(request, slices, acceptedAtMillis,
-                    currentTerm.get(), id);
-            write(entry, true);
+            write(() -> checkpoints.acceptedEntry(request, slices, acceptedAtMillis,
+                    currentTerm.get(), id), true);
         }
 
         @Override
         public void onSliceUpdated(int jobId, int taskId, com.cs324.registry.proto.WorkerEndpoint owner,
                 int attempt, TaskResult result) {
-            write(checkpoints.sliceEntry(jobId, taskId, owner, attempt, result, currentTerm.get(), id), false);
+            write(() -> checkpoints.sliceEntry(jobId, taskId, owner, attempt, result, currentTerm.get(), id), false);
         }
 
         @Override
         public void onFinished(int jobId, TaskResult result) {
-            write(checkpoints.finishedEntry(jobId, result, false, currentTerm.get(), id), false);
+            write(() -> checkpoints.finishedEntry(jobId, result, false, currentTerm.get(), id), false);
         }
 
         @Override
         public void onDelivered(int jobId) {
-            checkpoints.markDelivered(jobId, true);
-            JobCheckpoint job = checkpoints.job(jobId);
-            if (job != null && job.finished()) {
-                write(checkpoints.finishedEntry(jobId, job.finalResult(), true, currentTerm.get(), id), false);
-            }
+            write(() -> {
+                JobCheckpoint job = checkpoints.job(jobId);
+                return job != null && job.finished()
+                        ? checkpoints.finishedEntry(jobId, job.finalResult(), true, currentTerm.get(), id) : null;
+            }, false);
         }
 
         @Override
@@ -1302,13 +1301,22 @@ public class WorkerRemoteImpl implements WorkerRemote, ElectionHandler, Failover
             checkpoints.markDelivered(jobId, false);
         }
 
-        private void write(CheckpointEntry entry, boolean waitForPeer) {
-            checkpoints.apply(entry);
+        private void write(java.util.function.Supplier<CheckpointEntry> create, boolean waitForPeer) {
+            CheckpointEntry entry;
+            List<CheckpointEntry> snapshot;
+            synchronized (checkpoints) {
+                entry = create.get();
+                if (entry == null) return;
+                checkpoints.apply(entry);
+                snapshot = checkpoints.snapshot(entry.getJobId());
+            }
             CheckpointReplicator active = replicator;
             if (active == null) {
                 return;
             }
-            active.replicate(List.of(entry), currentTerm.get(), waitForPeer);
+            // Independent asynchronous RPCs may overtake one another. Every push
+            // carries cumulative state, so a newer sequence subsumes older updates.
+            active.replicate(snapshot, entry.getTerm(), waitForPeer);
             recordEvent(WorkerEvent.CHECKPOINT_REPLICATED, "job " + entry.getJobId() + " sequence "
                     + entry.getSequence() + " (" + entry.getEntryCase() + ")");
         }

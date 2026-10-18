@@ -65,6 +65,16 @@ public final class JobCheckpoint {
         return acceptedBy;
     }
 
+    /** Detached read view; called while the owning log holds its monitor. */
+    JobCheckpoint copy() {
+        JobCheckpoint copy = new JobCheckpoint(request, acceptedAtMillis, sequence, term);
+        copy.slices.putAll(slices);
+        copy.acceptedBy = acceptedBy;
+        copy.finalResult = finalResult;
+        copy.delivered = delivered;
+        return copy;
+    }
+
     void acceptedBy(int coordinatorId) {
         this.acceptedBy = coordinatorId;
     }

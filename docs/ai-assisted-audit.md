@@ -89,3 +89,18 @@ another peer knew the job was already finished. The original regression returned
 empty fetch for a retained delivered job. Fetch now includes all retained jobs,
 including terminal markers; the test confirms an older replica becomes finished
 and delivered. Existing bounded checkpoint retention still applies.
+
+## Out-of-order replication
+
+**High severity:** asynchronous per-job delta RPCs could arrive before acceptance
+or before an earlier slice update. The log's highest-sequence filter then permanently
+discarded required state. `CheckpointReplicationTest` captures actual gRPC pushes
+from a running coordinator and folds them in reverse arrival order; the original
+code lost the finished job. Each push now carries the cumulative job snapshot.
+Sequence allocation, local folding and snapshot capture are atomic, with network
+I/O outside the lock. Log reads return detached job views so concurrent incoming
+replication cannot mutate a recovery reader's slice collection.
+
+Tradeoff: full snapshots send more bytes than deltas. This favors correctness and
+explainability for the small assignment cluster; replication is still best effort,
+in memory, and cannot guarantee recovery when every replica misses the state.
