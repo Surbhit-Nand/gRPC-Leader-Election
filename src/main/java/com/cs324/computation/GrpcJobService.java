@@ -274,7 +274,10 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
             probes=timer.scheduleWithFixedDelay(this::probe, PROBE_INTERVAL_MILLIS, PROBE_INTERVAL_MILLIS, TimeUnit.MILLISECONDS);
         }
         synchronized void dispatch() {
-            try { for (Slice slice : slices) dispatch(slice); }
+            try {
+                for (Slice slice : slices) dispatch(slice);
+                finishIfComplete();
+            }
             catch (RuntimeException e) { fail("Dispatch failed: " + e.getMessage()); }
         }
         private void dispatch(Slice slice) {
@@ -372,7 +375,10 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
                     + " by Worker " + result.getWorkerId() + " (attempt " + slice.attempt + ")");
             publishProgress();
             checkpointSlice(slice, result);
-            if (slices.stream().allMatch(s -> s.result!=null)) {
+            finishIfComplete();
+        }
+        private void finishIfComplete() {
+            if (!finished && slices.stream().allMatch(s -> s.result!=null)) {
                 try { finish(ComputationCodec.result(request.getJobId(), id, request.getJobType(),
                         WorkerTaskDistributor.combine(request.getJobType(), slices.stream().map(s -> s.result).toList()))); }
                 catch (Exception e) { fail("Aggregation failed: " + e.getMessage()); }
