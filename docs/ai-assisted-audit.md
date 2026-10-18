@@ -71,3 +71,12 @@ documented bootstrap/client gRPC port arguments select the actual endpoints.
 Verification includes actual worker JVMs, a bootstrap with no exported RMI object,
 dynamic joins, gRPC monitoring, a forcibly terminated coordinator, correct recovered
 PRIMESUM and completed progress. The historical regression suite is retained.
+
+## Snapshot sequence consistency
+
+**High severity:** finished snapshots invented sequence `N + 1` for their terminal
+entry. Fetching a snapshot could therefore suppress the next genuine delivery
+acknowledgement at that same sequence. `finishedSnapshotDoesNotConsumeTheNextDeliverySequence`
+reproduced source sequence `2` becoming replica sequence `3`. Snapshot construction
+now uses `N - 1` for the input envelope and `N` for the terminal marker, preserving
+the actual high-water mark and accepting the subsequent delivery update.

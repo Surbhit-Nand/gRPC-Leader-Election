@@ -185,6 +185,21 @@ class CheckpointLogTest {
     }
 
     @Test
+    void finishedSnapshotDoesNotConsumeTheNextDeliverySequence() {
+        CheckpointLog source = logWithAcceptedJob(7, 1);
+        TaskResult result = TaskResult.newBuilder().setJobId(7).setLongResult(17L).build();
+        source.apply(source.finishedEntry(7, result, false, TERM_ONE, 1));
+        CheckpointLog replica = new CheckpointLog(4);
+        source.snapshot(7).forEach(replica::apply);
+        assertEquals(source.job(7).sequence(), replica.job(7).sequence(),
+                "fetching a snapshot must not invent a write sequence");
+        var delivered = source.finishedEntry(7, result, true, TERM_ONE, 1);
+        source.apply(delivered);
+        assertTrue(replica.apply(delivered));
+        assertTrue(replica.job(7).delivered());
+    }
+
+    @Test
     void entriesWithoutARequestOrPayloadShapeAreRejected() {
         CheckpointLog log = new CheckpointLog(9);
         assertFalse(log.apply(CheckpointEntry.getDefaultInstance()), "an empty entry changes nothing");

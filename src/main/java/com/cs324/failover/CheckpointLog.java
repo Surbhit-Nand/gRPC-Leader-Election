@@ -196,7 +196,9 @@ public final class CheckpointLog {
         List<CheckpointEntry> entries = new ArrayList<>(2);
         entries.add(CheckpointEntry.newBuilder()
                 .setJobId(jobId)
-                .setSequence(job.sequence())
+                // A terminal snapshot needs two entries, but neither may invent a
+                // future sequence or the next real delivery update will be dropped.
+                .setSequence(job.finished() ? job.sequence() - 1 : job.sequence())
                 .setTerm(job.term())
                 .setCoordinatorId(job.acceptedBy())
                 .setAccepted(JobAccepted.newBuilder()
@@ -207,7 +209,7 @@ public final class CheckpointLog {
         if (job.finished()) {
             entries.add(CheckpointEntry.newBuilder()
                     .setJobId(jobId)
-                    .setSequence(job.sequence() + 1)
+                    .setSequence(job.sequence())
                     .setTerm(job.term())
                     .setCoordinatorId(job.acceptedBy())
                     .setFinished(JobFinished.newBuilder()
