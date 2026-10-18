@@ -878,7 +878,7 @@ public class ClientApp extends JFrame {
                         // Progress failure must never resubmit an already accepted job.
                         try {
                             progressView.watch(jobEndpoint.getHost(), jobEndpoint.getGrpcPort(), jobId, modelRow,
-                                    () -> generation == historyGeneration);
+                                    () -> generation == historyGeneration, grpcDirectory::workers);
                         } catch (Exception progressError) {
                             SwingUtilities.invokeLater(() -> {
                                 if (generation == historyGeneration) jobModel.setValueAt("Unavailable", modelRow, 5);

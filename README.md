@@ -365,7 +365,7 @@ and service classes during `compile`; reload the Maven project in your IDE.
 The coordinator retains the latest 256 completed job snapshots, allowing very fast
 jobs to display progress even when they finish before the client subscribes.
 
-Job submission, task delivery, results, progress, elections, neighbour links and cluster monitoring all use gRPC. Progress updates occur at share completion. Interrupted streams do not yet reconnect automatically. Worker reassignment is implemented: unfinished units move to the replacement worker without double-counting completed work. Coordinator state recovery is implemented; see [distribution integration](docs/job-distribution.md) for details.
+Job submission, task delivery, results, progress, elections, neighbour links and cluster monitoring all use gRPC. Progress updates occur at share completion. Interrupted streams reconnect automatically and rediscover the worker holding the job. A 30-second stream deadline also detects silent interruptions; completion remains based on reported work. Worker reassignment is implemented: unfinished units move to the replacement worker without double-counting completed work. Coordinator state recovery is implemented; see [distribution integration](docs/job-distribution.md) for details.
 
 ## Worker failure recovery
 

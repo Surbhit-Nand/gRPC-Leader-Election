@@ -104,3 +104,14 @@ replication cannot mutate a recovery reader's slice collection.
 Tradeoff: full snapshots send more bytes than deltas. This favors correctness and
 explainability for the small assignment cluster; replication is still best effort,
 in memory, and cannot guarantee recovery when every replica misses the state.
+
+## Progress stream recovery
+
+**High severity:** `JobProgressView` closed interrupted streams permanently, so the
+job could recover and return its result while the GUI breakdown remained frozen.
+The regression restarted a real progress listener and the old view never resumed.
+Subscriptions now retry, rediscover published worker endpoints and find the job's
+owner without resubmitting it. A 30-second stream deadline bounds detection of a
+silent connection; retries occur at 500 ms intervals. A second regression moves
+the recovered job to a different port. Both assert all model changes stay on Swing's
+event thread. Closing/clearing the view cancels subscriptions and retry executors.
