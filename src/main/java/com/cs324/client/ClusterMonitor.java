@@ -20,11 +20,11 @@ import java.util.TreeMap;
 // Headless cluster observer for the GUI: polls the directory plus every worker
 // (snapshot rows and each worker's sequenced event log), then merges exact
 // worker happenings with snapshot-diff lines for what workers cannot self-report.
-// All RMI happens on the caller's thread, never on the Swing event thread.
+// All network calls happen on the caller's thread, never on the Swing event thread.
 public final class ClusterMonitor {
 
     // Resolves a worker stub for one directory entry; null means unreachable.
-    // Production passes the RMI registry lookup; tests pass a map-backed fake.
+    // Production passes a gRPC adapter; tests may pass a map-backed fake.
     public interface WorkerLookup {
         WorkerRemote lookup(int workerId, WorkerAddress address);
     }

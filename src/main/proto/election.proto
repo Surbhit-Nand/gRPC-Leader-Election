@@ -27,11 +27,16 @@ service ElectionService {
   rpc AnnounceCoordinator(CoordinatorAnnouncement) returns (CoordinatorAck);
 }
 
+// Member 2 additions (additive only; fields 1-4 keep their numbers and meaning):
+// - term (field 5) marks which leadership generation a hop belongs to, so a
+//   stale wave or a late echo from a superseded wave can be recognised instead
+//   of overwriting a newer coordinator.
 message ElectionMessage {
   int32 origin_id = 1;
   int32 candidate_id = 2;
   int32 candidate_jac = 3;
   int64 message_id = 4;
+  int64 term = 5;
 }
 
 message ElectionAck {}
@@ -41,13 +46,19 @@ message EchoMessage {
   int32 from_worker_id = 2;
   int32 best_candidate_id = 3;
   int32 best_candidate_jac = 4;
+  int64 term = 5;
 }
 
 message EchoAck {}
 
+// term (field 3) is the leadership generation the winner announces. A worker
+// applies an announcement only when (term, coordinator_id) is not older than the
+// pair it already holds, which is what stops a resurrected (deposed) coordinator
+// from reclaiming a term it has already lost.
 message CoordinatorAnnouncement {
   int32 coordinator_id = 1;
   int64 message_id = 2;
+  int64 term = 3;
 }
 
 message CoordinatorAck {}

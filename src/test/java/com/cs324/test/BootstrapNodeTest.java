@@ -62,11 +62,11 @@ class BootstrapNodeTest {
 
     @Test
     void startsSuccessfullyOnAFreePort() throws Exception {
-        runningProcess = startBootstrap(String.valueOf(TEST_PORT), "0");
+        runningProcess = startBootstrap("0", String.valueOf(TEST_PORT));
         String output = readAvailableOutput(runningProcess);
 
         assertTrue(runningProcess.isAlive(), "a successfully started Bootstrap Node should keep running, not exit");
-        assertTrue(output.contains("running on port " + TEST_PORT),
+        assertTrue(output.contains("RegistryService on port " + TEST_PORT),
                 "expected a startup confirmation message, got: " + output);
     }
 
@@ -82,11 +82,11 @@ class BootstrapNodeTest {
     @Test
     void exitsCleanlyWhenPortIsAlreadyInUse() throws Exception {
         // First process claims the port and stays running.
-        runningProcess = startBootstrap(String.valueOf(TEST_PORT), "0");
+        runningProcess = startBootstrap("0", String.valueOf(TEST_PORT));
         readAvailableOutput(runningProcess); // let it finish starting up
 
         // The second node must print the failure *and* exit; it used to hang forever instead.
-        Process second = startBootstrap(String.valueOf(TEST_PORT), "0");
+        Process second = startBootstrap("0", String.valueOf(TEST_PORT));
         boolean exitedInTime = second.waitFor(5, TimeUnit.SECONDS);
 
         assertTrue(exitedInTime, "a port conflict should fail fast and exit, not hang forever");

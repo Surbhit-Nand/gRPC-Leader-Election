@@ -148,4 +148,36 @@ class GrpcJobDistributionTest {
         assertEquals(Status.Code.INVALID_ARGUMENT, error.getStatus().getCode());
         assertEquals(address, discovery.worker(1));
     }
+
+    @Test void recoveredJobWithEverySliceCompletedDeliversWithoutRecomputing() throws Exception {
+        SubmitJobRequest request = request("PRIMESUM", new WorkerTaskCalculator.PrimeRange(1, 10));
+        var slices = List.of(
+                new com.cs324.failover.RestoredJob.RestoredSlice(1,
+                        ComputationCodec.encode(new WorkerTaskCalculator.PrimeRange(1, 5)),
+                        discovery.worker(1), 1, TaskResult.newBuilder().setLongResult(10L).build()),
+                new com.cs324.failover.RestoredJob.RestoredSlice(2,
+                        ComputationCodec.encode(new WorkerTaskCalculator.PrimeRange(6, 10)),
+                        discovery.worker(2), 1, TaskResult.newBuilder().setLongResult(7L).build()));
+        CompletableFuture<Object> result = results.computeIfAbsent(request.getJobId(), ignored -> new CompletableFuture<>());
+        assertTrue(services.get(0).restore(new com.cs324.failover.RestoredJob(request, slices, false), 500));
+        assertEquals(17L, result.get(5, TimeUnit.SECONDS));
+        assertEquals(0, assignments.get(), "completed slices must not execute again");
+        assertTrue(progress(request.getJobId()).getFinished());
+        assertFalse(services.get(0).coordinatedJobIds().contains(request.getJobId()));
+    }
+
+    @Test void replayReportsFailureUntilClientAcknowledges() throws Exception {
+        Server rejecting = ServerBuilder.forPort(0).addService(new ClientServiceGrpc.ClientServiceImplBase() {
+            @Override public void deliverResult(TaskResult result, io.grpc.stub.StreamObserver<DeliverResultAck> reply) {
+                reply.onError(Status.UNAVAILABLE.asRuntimeException());
+            }
+        }).build().start();
+        servers.add(rejecting);
+        SubmitJobRequest request = request("MAX", new int[]{17});
+        TaskResult result = TaskResult.newBuilder().setJobId(request.getJobId()).setIntResult(17).build();
+        assertFalse(services.get(0).deliverResult(request.toBuilder().setClient(request.getClient().toBuilder()
+                .setPort(rejecting.getPort())).build(), result));
+        assertTrue(services.get(0).deliverResult(request, result));
+        assertEquals(17, results.get(request.getJobId()).get(1, TimeUnit.SECONDS));
+    }
 }

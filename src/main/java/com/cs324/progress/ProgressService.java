@@ -34,7 +34,7 @@ public final class ProgressService extends JobProgressServiceGrpc.JobProgressSer
         for (int i = 0; i < next.getWorkersCount(); i++) {
             WorkerProgress worker = next.getWorkers(i);
             if (worker.getWorkerId() == workerId && worker.getStatus().equals("Processing")) {
-                next.setWorkers(i, worker.toBuilder().setCompletedUnits(success ? worker.getTotalUnits() : 0)
+                next.setWorkers(i, worker.toBuilder().setCompletedUnits(success ? worker.getTotalUnits() : worker.getCompletedUnits())
                         .setStatus(success ? "Completed" : "Failed"));
             }
         }

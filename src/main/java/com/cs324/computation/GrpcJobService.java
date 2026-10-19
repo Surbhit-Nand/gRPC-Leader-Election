@@ -34,9 +34,30 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
     private record Submission(SubmitJobRequest request, CompletableFuture<Void> ready) {}
     private final Map<Integer, Submission> submissions = new ConcurrentHashMap<>();
     private record TaskKey(int job, int task, int attempt) {}
-    private record Work(TaskAssignment request, CompletableFuture<TaskResult> result) {}
+    /** Mutable on purpose: a new coordinator may take over where an attempt must report. */
+    private static final class Work {
+        volatile TaskAssignment request;
+        final CompletableFuture<TaskResult> result = new CompletableFuture<>();
+        Work(TaskAssignment request) { this.request = request; }
+        TaskAssignment request() { return request; }
+        CompletableFuture<TaskResult> result() { return result; }
+    }
     private final Map<TaskKey, Work> tasks = new ConcurrentHashMap<>();
     private final Set<ManagedChannel> channels = ConcurrentHashMap.newKeySet();
+    // Replication is optional and additive: without a sink the job service behaves exactly
+    // as before, and a failing sink can never fail a job.
+    private volatile com.cs324.failover.CheckpointSink checkpoints = com.cs324.failover.CheckpointSink.noop();
+
+    /** Lets Member 2 replicate coordinator state; additive and independent of job behaviour. */
+    public void setCheckpointSink(com.cs324.failover.CheckpointSink sink) {
+        this.checkpoints = sink == null ? com.cs324.failover.CheckpointSink.noop() : sink;
+    }
+
+    /** Observed through a wrapper so a replication fault cannot escape into the job path. */
+    private void checkpoint(java.util.function.Consumer<com.cs324.failover.CheckpointSink> action) {
+        try { action.accept(checkpoints); }
+        catch (RuntimeException e) { System.err.println("Checkpoint update failed: " + e.getMessage()); }
+    }
 
     public GrpcJobService(int id, Supplier<CoordinatorEndpoint> self, Supplier<List<WorkerEndpoint>> discovery,
             IntPredicate admission, IntConsumer assignment, Runnable accepted, Executor executor,
@@ -107,16 +128,26 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
         } catch (Exception e) { response.onError(status(e)); }
     }
 
-    // Run shares on the worker pool; duplicate assignments must not repeat the calculation.
+// Run shares on the worker pool; duplicate assignments must not repeat the calculation.
     @Override public void assignTask(TaskAssignment request, StreamObserver<TaskAck> response) {
         try {
             if (request.getJobId() < 1) throw new IllegalArgumentException("Positive job ID required");
             endpoint(request.getCoordinator().getHost(), request.getCoordinator().getPort());
             TaskKey key = new TaskKey(request.getJobId(), request.getTaskId(), request.getAttempt());
-            Work work = new Work(request, new CompletableFuture<>());
+            Work work = new Work(request);
             Work previous = tasks.putIfAbsent(key, work);
-            if (previous != null && !previous.request().equals(request))
+            if (previous != null && !previous.request().equals(request)) {
+                // Same (job, task, attempt) from a different coordinator: the work is already
+                // done or in flight, so recomputing would waste it and answering the old
+                // coordinator would lose the result. Move the report target instead.
+                if (sameAttemptNewCoordinator(previous.request(), request)) {
+                    previous.request = request;
+                    if (previous.result().isDone()) report(request, previous.result().join());
+                    ack(response, TaskAck.getDefaultInstance());
+                    return;
+                }
                 throw Status.ALREADY_EXISTS.withDescription("Conflicting task attempt").asRuntimeException();
+            }
             if (previous == null) {
                 try {
                     Object input = ComputationCodec.decode(request.getJobType(), request.getPayload());
@@ -133,6 +164,13 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
             }
             ack(response, TaskAck.getDefaultInstance());
         } catch (Exception e) { response.onError(status(e)); }
+    }
+
+    /** Identical work with only the reporting coordinator replaced, which a failover does. */
+    private static boolean sameAttemptNewCoordinator(TaskAssignment held, TaskAssignment incoming) {
+        return held.getJobId() == incoming.getJobId() && held.getTaskId() == incoming.getTaskId()
+                && held.getAttempt() == incoming.getAttempt() && held.getJobType().equals(incoming.getJobType())
+&& held.getPayload().equals(incoming.getPayload());
     }
 
     private void report(TaskAssignment request, TaskResult result) {
@@ -164,6 +202,8 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
         final SubmitJobRequest request;
         final List<Slice> slices = new ArrayList<>();
         final Set<Integer> failedWorkers = new HashSet<>();
+        // When the job was accepted, so a restored job keeps the deadline it would have had.
+        final long acceptedAtMillis = System.currentTimeMillis();
         ScheduledFuture<?> deadline, probes;
         boolean finished;
         final class Slice {
@@ -183,6 +223,22 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
             WorkerEndpoint local = WorkerEndpoint.newBuilder().setWorkerId(id).build();
             for (int i=0; i<chunks.size(); i++) slices.add(new Slice(i+1, chunks.get(i), i==0?local:peers.get(i-1)));
         }
+        /** Rebuilds a job a dead coordinator owned; every field comes from the replicated log. */
+        Run(com.cs324.failover.RestoredJob restored) {
+            this.request = restored.request();
+            for (com.cs324.failover.RestoredJob.RestoredSlice slice : restored.slices()) {
+                Slice copy = new Slice(slice.taskId(),
+                        ComputationCodec.decode(request.getJobType(), slice.payload()), slice.owner());
+                copy.attempt = Math.max(slice.attempt(), 1);
+                if (slice.result() != null) {
+                    // Already answered before the failure: keep the answer so the job neither
+                    // recomputes it nor counts it twice.
+                    Object value = ComputationCodec.result(slice.result());
+                    if (value instanceof Number number) copy.result = number;
+                }
+                slices.add(copy);
+            }
+        }
         private void log(String kind, String detail) {
             event(kind, detail + " [" + ComputationCodec.type(request.getJobType()) + "]");
         }
@@ -191,9 +247,37 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
             publishProgress();
             deadline=timer.schedule(() -> fail("Job timed out waiting for worker results"), timeoutMillis, TimeUnit.MILLISECONDS);
             probes=timer.scheduleWithFixedDelay(this::probe, PROBE_INTERVAL_MILLIS, PROBE_INTERVAL_MILLIS, TimeUnit.MILLISECONDS);
+            checkpoint(sink -> sink.onAccepted(request, checkpointSlices(), acceptedAtMillis));
+        }
+        /** The accepted split as replication needs it: identity, input, owner and attempt. */
+        private List<com.cs324.failover.CheckpointSink.SliceSnapshot> checkpointSlices() {
+            List<com.cs324.failover.CheckpointSink.SliceSnapshot> snapshot =
+                    new ArrayList<>(slices.size());
+            for (Slice slice : slices)
+                snapshot.add(new com.cs324.failover.CheckpointSink.SliceSnapshot(slice.taskId,
+                        ComputationCodec.encode(slice.input), slice.owner, slice.attempt));
+            return snapshot;
+        }
+        /** Publishes one slice transition so a survivor knows where the work went. */
+        private void checkpointSlice(Slice slice, TaskResult result) {
+            checkpoint(sink -> sink.onSliceUpdated(request.getJobId(), slice.taskId,
+                    slice.owner, slice.attempt, result));
+        }
+        /** Restarts a recovered job: the original deadline is not extended, only its floor. */
+        void beginRestored(long remainingMillis) {
+            long pending = slices.stream().filter(slice -> slice.result==null).count();
+            log(WorkerEvent.JOB_RECOVERED, "Job " + request.getJobId() + " restored on coordinator Worker "
+                    + id + " with " + pending + " unfinished slice(s)");
+            publishProgress();
+            deadline=timer.schedule(() -> fail("Job timed out waiting for worker results"),
+                    Math.max(remainingMillis, 1L), TimeUnit.MILLISECONDS);
+            probes=timer.scheduleWithFixedDelay(this::probe, PROBE_INTERVAL_MILLIS, PROBE_INTERVAL_MILLIS, TimeUnit.MILLISECONDS);
         }
         synchronized void dispatch() {
-            try { for (Slice slice : slices) dispatch(slice); }
+            try {
+                for (Slice slice : slices) dispatch(slice);
+                finishIfComplete();
+            }
             catch (RuntimeException e) { fail("Dispatch failed: " + e.getMessage()); }
         }
         private void dispatch(Slice slice) {
@@ -209,6 +293,7 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
                         .toBuilder().setTaskId(slice.taskId).setAttempt(attempt).build()));
             } else {
                 assignment.accept(slice.owner.getWorkerId());
+                checkpointSlice(slice, null);
                 sendAssignment(slice);
             }
         }
@@ -220,9 +305,13 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
         private void sendAssignment(Slice slice) {
             int attempt=slice.attempt;
             slice.probing=true;
-            if (slice.wireTask==null || slice.wireTask.getAttempt()!=attempt) slice.wireTask=TaskAssignment.newBuilder().setJobId(request.getJobId())
-                    .setTaskId(slice.taskId).setAttempt(attempt).setJobType(request.getJobType())
-                    .setPayload(ComputationCodec.encode(slice.input)).setCoordinator(self.get()).build();
+            // Rebuild when the attempt or the reporting coordinator changed: after a failover
+            // the same attempt must carry the new endpoint or results go to the dead leader.
+            if (slice.wireTask==null || slice.wireTask.getAttempt()!=attempt
+                    || !slice.wireTask.getCoordinator().equals(self.get())) slice.wireTask=TaskAssignment.newBuilder()
+                    .setJobId(request.getJobId()).setTaskId(slice.taskId).setAttempt(attempt)
+                    .setJobType(request.getJobType()).setPayload(ComputationCodec.encode(slice.input))
+                    .setCoordinator(self.get()).build();
             TaskAssignment task=slice.wireTask;
             GrpcJobService.this.<TaskAck>send(slice.owner.getHost(), slice.owner.getGrpcPort(),
                     (channel, observer) -> JobServiceGrpc.newStub(channel).withDeadlineAfter(PROBE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
@@ -264,6 +353,7 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
                     slice.probing=false;
                     slice.recovering=false;
                     publishProgress();
+                    checkpointSlice(slice, null);
                     try { dispatch(slice); }
                     catch (RuntimeException e) { fail("Recovery dispatch failed: " + e.getMessage()); }
                 }
@@ -284,7 +374,11 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
                     + ": " + (slice.attempt>1 ? "reassigned task completed" : "task completed")
                     + " by Worker " + result.getWorkerId() + " (attempt " + slice.attempt + ")");
             publishProgress();
-            if (slices.stream().allMatch(s -> s.result!=null)) {
+            checkpointSlice(slice, result);
+            finishIfComplete();
+        }
+        private void finishIfComplete() {
+            if (!finished && slices.stream().allMatch(s -> s.result!=null)) {
                 try { finish(ComputationCodec.result(request.getJobId(), id, request.getJobType(),
                         WorkerTaskDistributor.combine(request.getJobType(), slices.stream().map(s -> s.result).toList()))); }
                 catch (Exception e) { fail("Aggregation failed: " + e.getMessage()); }
@@ -314,11 +408,95 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
             if (deadline!=null) deadline.cancel(false);
             if (probes!=null) probes.cancel(false);
             jobs.remove(request.getJobId(), this);
+            // Tombstone first, then the delivery outcome: a survivor that reads the log between
+            // those two steps sees a finished job whose delivery is still unknown, and replays it.
+            checkpoint(sink -> sink.onFinished(request.getJobId(), result));
             ClientEndpoint client=request.getClient();
-            GrpcJobService.this.<DeliverResultAck>send(client.getHost(), client.getPort(), (channel, observer) -> ClientServiceGrpc.newStub(channel)
-                    .withDeadlineAfter(10, TimeUnit.SECONDS).deliverResult(result, observer),
-                    error -> System.err.println("Cannot deliver job " + request.getJobId() + " result: " + error));
+            int jobId=request.getJobId();
+            GrpcJobService.this.<DeliverResultAck>send(client.getHost(), client.getPort(), (channel, observer) ->
+                    ClientServiceGrpc.newStub(channel).withDeadlineAfter(10, TimeUnit.SECONDS)
+                            .deliverResult(result, new StreamObserver<>() {
+                        public void onNext(DeliverResultAck ack) { }
+                        public void onError(Throwable error) {
+                            checkpoint(sink -> sink.onDeliveryFailed(jobId));
+                            observer.onError(error);
+                        }
+                        public void onCompleted() {
+                            checkpoint(sink -> sink.onDelivered(jobId));
+                            observer.onCompleted();
+                        }
+                    }), error -> {
+                        checkpoint(sink -> sink.onDeliveryFailed(jobId));
+                        System.err.println("Cannot deliver job " + jobId + " result: " + error);
+                    });
         }
+    }
+
+    /**
+     * Resumes a job whose coordinator died, from state read back out of the replicated log.
+     *
+     * <p>Additive and outside the admission predicate on purpose: a recovered job was already
+     * accepted and billed to the client, so re-checking the five-job budget here would either
+     * refuse work that is already owed to a client or charge the new term twice. It also
+     * registers the original request in {@code submissions}, so a client that resubmits the
+     * same job id is acknowledged instead of running the work again.
+     *
+     * @return false when this job id is already being coordinated here.
+     */
+    public boolean restore(com.cs324.failover.RestoredJob restored, long remainingMillis) {
+        try {
+            SubmitJobRequest request = restored.request();
+            if (request.getJobId() < 1) throw new IllegalArgumentException("Positive job ID required");
+            endpoint(request.getClient().getHost(), request.getClient().getPort());
+            if (jobs.containsKey(request.getJobId())) return false;
+            // Identity claim first: a concurrent duplicate submission then attaches to this
+            // job instead of starting a second run of the same work.
+            Submission claim = new Submission(request, CompletableFuture.completedFuture(null));
+            if (submissions.putIfAbsent(request.getJobId(), claim) != null) return false;
+            Run run;
+            try {
+                run = new Run(restored);
+                if (run.slices.isEmpty()) throw new IllegalArgumentException("A restored job needs its slices");
+                jobs.put(request.getJobId(), run);
+                run.beginRestored(remainingMillis);
+                executor.execute(run::dispatch);
+            } catch (RuntimeException e) {
+                submissions.remove(request.getJobId(), claim);
+                Run failed = jobs.remove(request.getJobId());
+                if (failed != null) failed.fail("Restored job could not start: " + e.getMessage());
+                return false;
+            }
+            return true;
+        } catch (RuntimeException e) {
+            System.err.println("Cannot restore job: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** Sends one already-computed result to its client, used when replaying a tombstone. */
+    public boolean deliverResult(SubmitJobRequest request, TaskResult result) {
+        ManagedChannel channel = null;
+        try {
+            ClientEndpoint client = request.getClient();
+            endpoint(client.getHost(), client.getPort());
+            channel = ManagedChannelBuilder.forAddress(client.getHost(), client.getPort()).usePlaintext().build();
+            channels.add(channel);
+            // Takeover runs on the worker pool. Only a received acknowledgement proves
+            // delivery; scheduling an asynchronous RPC does not.
+            ClientServiceGrpc.newBlockingStub(channel).withDeadlineAfter(10, TimeUnit.SECONDS)
+                    .deliverResult(result);
+            return true;
+        } catch (RuntimeException e) {
+            System.err.println("Cannot replay job result: " + e.getMessage());
+            return false;
+        } finally {
+            if (channel != null) { channels.remove(channel); channel.shutdownNow(); }
+        }
+    }
+
+    /** Job ids this coordinator currently owns, so a failover can tell taken from untouched. */
+    public Set<Integer> coordinatedJobIds() {
+        return Set.copyOf(jobs.keySet());
     }
 
     private TaskResult error(int jobId, String text) {

@@ -5,9 +5,9 @@
 #
 # Usage (one terminal per node, project root):
 #   .\run.ps1 build                              # compile + fetch runtime jars into target/dependency
-#   .\run.ps1 bootstrap [rmiPort] [grpcPort]    # defaults 1099 50051
-#   .\run.ps1 worker [host] [port] [grpc]       # default localhost 1099 RMI; third arg "grpc"
-#                                               # or a grpc port number registers over gRPC instead
+#   .\run.ps1 bootstrap [legacyUnusedPort] [grpcPort] # defaults 1099 50051; gRPC only
+#   .\run.ps1 worker [host] [legacyUnusedPort] [grpcPort] # default localhost 1099 50051
+#                                               # "grpc" remains a compatible third argument
 #   .\run.ps1 client [host] [port] [callbackPort] [grpcPort]  # defaults localhost 1099 1199 50051
 $ErrorActionPreference = "Stop"
 
@@ -47,8 +47,7 @@ switch ($command) {
     "worker" {
         $hostArg = if ($args.Count -ge 2) { $args[1] } else { "localhost" }
         $portArg = if ($args.Count -ge 3) { $args[2] } else { "1099" }
-        # Third arg selects the registration transport: "grpc" for the default
-        # gRPC port, or a port number for --grpc-port (implies --grpc).
+        # All communication uses gRPC. Third arg optionally selects its bootstrap port.
         $nodeArgs = @($hostArg, $portArg)
         if ($args.Count -ge 4) {
             if ($args[3] -eq "grpc") { $nodeArgs = @("--grpc") + $nodeArgs }
@@ -64,6 +63,6 @@ switch ($command) {
         & java -cp (Get-Classpath) com.cs324.client.ClientApp $hostArg $portArg $callbackArg $grpcArg
     }
     default {
-        Write-Host "Usage: .\run.ps1 build | bootstrap [rmiPort] [grpcPort] | worker [host] [port] [grpc|grpcPort] | client [host] [port] [callbackPort] [grpcPort]"
+        Write-Host "Usage: .\run.ps1 build | bootstrap [legacyUnusedPort] [grpcPort] | worker [host] [legacyUnusedPort] [grpc|grpcPort] | client [host] [legacyUnusedPort] [callbackPort] [grpcPort]"
     }
 }

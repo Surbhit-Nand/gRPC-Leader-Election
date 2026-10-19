@@ -8,7 +8,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /** Member 1 registry adapter. RMI contact ports are never used for job RPCs. */
-public final class RegistryClient implements AutoCloseable {
+public final class RegistryClient implements AutoCloseable, com.cs324.common.BootstrapRemote {
     private final ManagedChannel channel;
     public RegistryClient(String host, int port) {
         channel = ManagedChannelBuilder.forAddress(host, port).usePlaintext().build();
@@ -24,6 +24,25 @@ public final class RegistryClient implements AutoCloseable {
     // Use the shared bootstrap sequence to keep IDs distinct across clients.
     public int allocateJobId() {
         return stub().allocateJobId(AllocateJobIdRequest.getDefaultInstance()).getJobId();
+    }
+    @Override public List<Integer> getActiveWorkerIds() {
+        return stub().getActiveWorkers(GetActiveWorkersRequest.getDefaultInstance()).getWorkerIdsList();
+    }
+    @Override public List<Integer> getAllocatedWorkerIds() { return getActiveWorkerIds(); }
+    @Override public com.cs324.common.WorkerAddress getWorkerAddress(int id) {
+        var reply = stub().getWorkerAddress(GetWorkerAddressRequest.newBuilder().setWorkerId(id).build());
+        if (!reply.getFound()) return null;
+        var w = reply.getWorker();
+        return new com.cs324.common.WorkerAddress(w.getHost(), w.getPort(), w.getGrpcPort());
+    }
+    @Override public void deregisterWorker(int id) { stub().deregister(DeregisterRequest.newBuilder().setWorkerId(id).build()); }
+    @Override public com.cs324.common.WorkerRegistration registerWorkerAuto(String host, int port) {
+        var reply = stub().register(RegisterRequest.newBuilder().setAutoAssign(true).setHost(host).setPort(port).build());
+        return new com.cs324.common.WorkerRegistration(reply.getWorkerId(), reply.getHasPeer() ? new GrpcWorkerClient(reply.getPeer()) : null);
+    }
+    @Override public com.cs324.common.WorkerRemote registerWorker(int id, String host, int port) {
+        var reply = stub().register(RegisterRequest.newBuilder().setWorkerId(id).setHost(host).setPort(port).build());
+        return reply.getHasPeer() ? new GrpcWorkerClient(reply.getPeer()) : null;
     }
     // Resolve a ready gRPC endpoint; the legacy RMI port cannot accept job RPCs.
     public WorkerEndpoint worker(int id) {

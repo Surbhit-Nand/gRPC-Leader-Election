@@ -1,9 +1,6 @@
 package com.cs324.client;
 
 import com.cs324.progress.proto.*;
-import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
-import io.grpc.stub.StreamObserver;
 import java.awt.*;
 import java.awt.event.*;
 import java.util.*;
@@ -16,7 +13,7 @@ final class JobProgressView implements AutoCloseable {
     private final DefaultTableModel jobs;
     private final Map<Integer, JobProgress> snapshots = new HashMap<>();
     private final Map<Integer, DefaultTableModel> details = new HashMap<>();
-    private final Set<ManagedChannel> channels = ConcurrentHashMap.newKeySet();
+    private final Set<JobProgressSubscription> subscriptions = ConcurrentHashMap.newKeySet();
     private final Set<JDialog> dialogs = new HashSet<>();
 
     void clear() {
@@ -90,7 +87,7 @@ final class JobProgressView implements AutoCloseable {
         refreshDetails(row);
         JDialog dialog = new JDialog(SwingUtilities.getWindowAncestor(table), "Worker progress — job " + jobs.getValueAt(row, 0));
         dialog.add(new JScrollPane(new JTable(model)), BorderLayout.CENTER);
-        dialog.add(new JLabel("Updates when a worker finishes its share. Reassigned shares keep their original worker label."), BorderLayout.SOUTH);
+        dialog.add(new JLabel("Updates when a worker finishes its share. Unfinished shares move to their replacement worker."), BorderLayout.SOUTH);
         dialog.setSize(720, 260);
         dialog.setLocationRelativeTo(table);
         dialog.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
@@ -113,18 +110,22 @@ final class JobProgressView implements AutoCloseable {
     }
 
     void watch(String host, int port, int jobId, int row, java.util.function.BooleanSupplier visible) {
+        watch(host, port, jobId, row, visible, java.util.List::of);
+    }
+
+    void watch(String host, int port, int jobId, int row, java.util.function.BooleanSupplier visible,
+            java.util.function.Supplier<java.util.List<com.cs324.registry.proto.WorkerEndpoint>> discovery) {
         if (!visible.getAsBoolean()) return;
         if (port <= 0) {
             SwingUtilities.invokeLater(() -> { if (visible.getAsBoolean()) jobs.setValueAt("Unavailable", row, 5); });
             return;
         }
-        ManagedChannel channel = ManagedChannelBuilder.forAddress(host, port).usePlaintext().build();
-        channels.add(channel);
-        if (!visible.getAsBoolean()) { channels.remove(channel); channel.shutdownNow(); return; }
-        JobProgressServiceGrpc.newStub(channel).watchJob(WatchJobRequest.newBuilder().setJobId(jobId).build(), new StreamObserver<>() {
-            public void onNext(JobProgress snapshot) {
+        var holder = new java.util.concurrent.atomic.AtomicReference<JobProgressSubscription>();
+        var subscription = new JobProgressSubscription(jobId,
+                com.cs324.registry.proto.WorkerEndpoint.newBuilder().setHost(host).setGrpcPort(port).build(),
+                discovery, visible, snapshot -> {
                 SwingUtilities.invokeLater(() -> {
-                    if (!visible.getAsBoolean()) return;
+                    if (!visible.getAsBoolean() || holder.get().cancelled()) return;
                     snapshots.put(row, snapshot);
                     long total = snapshot.getWorkersList().stream().mapToLong(WorkerProgress::getTotalUnits).sum();
                     long done = snapshot.getWorkersList().stream().mapToLong(WorkerProgress::getCompletedUnits).sum();
@@ -132,15 +133,13 @@ final class JobProgressView implements AutoCloseable {
                     jobs.setValueAt(percent, row, 5);
                     refreshDetails(row);
                 });
-            }
-            public void onError(Throwable error) {
-                SwingUtilities.invokeLater(() -> { if (visible.getAsBoolean()) jobs.setValueAt("Stream interrupted", row, 5); });
-                release();
-            }
-            public void onCompleted() { release(); }
-            private void release() { channels.remove(channel); channel.shutdownNow(); }
-        });
+            }, () -> SwingUtilities.invokeLater(() -> {
+                if (visible.getAsBoolean() && !holder.get().cancelled()) jobs.setValueAt("Reconnecting", row, 5);
+            }), subscriptions::remove);
+        holder.set(subscription);
+        subscriptions.add(subscription);
+        subscription.start();
     }
 
-    @Override public void close() { channels.forEach(ManagedChannel::shutdownNow); channels.clear(); }
+    @Override public void close() { subscriptions.forEach(JobProgressSubscription::close); subscriptions.clear(); }
 }
