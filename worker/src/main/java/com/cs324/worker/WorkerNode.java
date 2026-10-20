@@ -4,6 +4,7 @@ import com.cs324.common.Constants;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Scanner;
 import java.util.Set;
@@ -30,7 +31,12 @@ public class WorkerNode {
             self.setBootstrapReference(directory, "localhost");
             self.enableGrpcJobs(config.bootstrapHost(), config.bootstrapGrpcPort(), "localhost", 0);
             // Refresh after publishing: concurrent joiners may not have been ready at registration.
-            for (var endpoint : directory.workers()) {
+            // Join a random live worker instead of the lowest ID, so the topology does not
+            // collapse into a star rooted at Worker 1. Repair still learns the parent's
+            // neighbours at connect time, so a survivor can chain onward when that parent dies.
+            var candidates = new ArrayList<>(directory.workers());
+            Collections.shuffle(candidates);
+            for (var endpoint : candidates) {
                 if (endpoint.getWorkerId() == workerId) continue;
                 try {
                     var peer = new com.cs324.computation.GrpcWorkerClient(endpoint);
