@@ -52,6 +52,15 @@ class JobProgressStreamingTest {
             assertTrue(failed.getFinished());
             assertEquals(0, completed(failed));
             assertEquals("Failed", failed.getWorkers(0).getStatus());
+
+            // A replacement worker may own both a completed and an unfinished slice.
+            service.update(44, Map.of(1, 10L), Map.of(1, 3L), java.util.Set.of(1));
+            service.complete(44, 1, false);
+            JobProgress partlyFailed = JobProgressServiceGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS)
+                    .watchJob(WatchJobRequest.newBuilder().setJobId(44).build()).next();
+            assertEquals(3, completed(partlyFailed), "failure must not erase previously completed work");
+            assertTrue(partlyFailed.getFinished());
+            assertEquals("Failed", partlyFailed.getWorkers(0).getStatus());
         } finally {
             channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
             server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);

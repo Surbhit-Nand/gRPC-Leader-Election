@@ -117,6 +117,8 @@ class BootstrapGrpcTest {
     @Test
     void secondAutoRegisterGetsIdTwoAndPeerEndpoint() throws Exception {
         registry.register(auto("localhost", TEST_RMI_PORT));
+        registry.register(RegisterRequest.newBuilder().setWorkerId(1).setHost("localhost")
+                .setPort(TEST_RMI_PORT).setGrpcPort(5001).setUpdateEndpoint(true).build());
         // Worker 1 is bound for real, so the directory can hand its endpoint over.
         FakeWorkerRemote worker1 = new FakeWorkerRemote(1);
         rmiRegistry.rebind("Worker1", worker1);

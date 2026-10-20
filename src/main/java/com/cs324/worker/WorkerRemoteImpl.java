@@ -7,6 +7,29 @@ import com.cs324.common.Constants;
 import com.cs324.common.WorkerAddress;
 import com.cs324.common.WorkerEvent;
 import com.cs324.common.WorkerRemote;
+import com.cs324.election.ElectionGrpcService;
+import com.cs324.election.ElectionHandler;
+import com.cs324.election.ElectionTransport;
+import com.cs324.election.GrpcElectionTransport;
+import com.cs324.election.RmiElectionTransport;
+import com.cs324.election.proto.CoordinatorAnnouncement;
+import com.cs324.election.proto.EchoMessage;
+import com.cs324.election.proto.ElectionMessage;
+import com.cs324.failover.CheckpointLog;
+import com.cs324.failover.CheckpointReplicator;
+import com.cs324.failover.CheckpointSink;
+import com.cs324.failover.CoordinatorHealthMonitor;
+import com.cs324.failover.FailoverCoordinator;
+import com.cs324.failover.FailoverGrpcService;
+import com.cs324.failover.FailoverHandler;
+import com.cs324.failover.FailureGate;
+import com.cs324.failover.GrpcCoordinatorProbe;
+import com.cs324.failover.JobCheckpoint;
+import com.cs324.failover.LeaderView;
+import com.cs324.failover.RestoredJob;
+import com.cs324.failover.proto.CheckpointEntry;
+import com.cs324.failover.proto.HeartbeatReply;
+import com.cs324.job.proto.TaskResult;
 import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
@@ -31,14 +54,38 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemote {
+public class WorkerRemoteImpl implements WorkerRemote, ElectionHandler, FailoverHandler {
+    private final boolean grpcOnly;
     private final com.cs324.progress.ProgressService progress = new com.cs324.progress.ProgressService();
     private io.grpc.Server progressServer;
+    private volatile int grpcPort = -1;
     private com.cs324.computation.RegistryClient grpcDirectory;
     private com.cs324.computation.GrpcJobService grpcJobs;
     private String grpcHost = "localhost";
 
-    // Share one listener for computation and progress, preserving term limits and JAC accounting.
+    // Election hops use gRPC once this worker publishes an endpoint. The RMI hop stays as the
+    // fallback for a cluster that never publishes one, and keeps every legacy election test valid.
+    private volatile ElectionTransport electionTransport;
+
+    // Leadership generation. 0 means "no term seen yet"; the legacy RMI adapters never carry a
+    // term, so ordering only ever applies to announcements that came over gRPC.
+    private final AtomicLong currentTerm = new AtomicLong(0);
+
+    // Coordinator failover (Member 2). The replica exists on every worker, not only on the
+    // coordinator, because the replica is what a survivor reads during a takeover.
+    private final CheckpointLog checkpoints;
+    private volatile CheckpointReplicator replicator;
+    private volatile CoordinatorHealthMonitor healthMonitor;
+    private volatile GrpcCoordinatorProbe probe;
+    private volatile FailoverCoordinator failover;
+    // Set while a new coordinator merges and rebuilds; jobs are refused in that window so a
+    // client cannot start the same work twice, once here and once through recovery.
+    private final AtomicBoolean failoverInProgress = new AtomicBoolean(false);
+    // One election per detected failure; the gate holds the window and the key.
+    private final FailureGate failureGate =
+            new FailureGate(Constants.FAILOVER_SUPPRESSION_MS, System::currentTimeMillis);
+
+    // Share one listener for computation, progress and election, preserving term limits and JAC accounting.
     public synchronized void startProgressServer() throws java.io.IOException {
         if (progressServer == null) {
             grpcJobs = new com.cs324.computation.GrpcJobService(id,
@@ -48,13 +95,24 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
                         if (grpcDirectory == null) throw new IllegalStateException("gRPC discovery is not configured");
                         return grpcDirectory.workers();
                     }, jobId -> {
-                        if (currentCoordinatorId != id || handoverInProgress.get()) return false;
+                        // Refuse while a takeover is rebuilding jobs, or the same work could be
+                        // accepted fresh here and resumed from the log a moment later.
+                        if (currentCoordinatorId != id || handoverInProgress.get() || failoverInProgress.get()) {
+                            return false;
+                        }
                         try { reserveTermSlot(jobId); return true; }
                         catch (RemoteException e) { return false; }
                     }, workerId -> {
                         jobAllocationCounter.incrementAndGet();
                     }, this::maybeRotateCoordinator, executor, progress, java.time.Duration.ofMinutes(10), this::recordEvent);
-            progressServer = io.grpc.ServerBuilder.forPort(0).addService(progress).addService(grpcJobs).build().start();
+            grpcJobs.setCheckpointSink(new ReplicatingCheckpointSink());
+            progressServer = io.grpc.ServerBuilder.forPort(0).addService(progress).addService(grpcJobs)
+                    .addService(new com.cs324.computation.WorkerControlService(this))
+                    .addService(new ElectionGrpcService(this))
+                    .addService(new FailoverGrpcService(this, id)).build().start();
+            // Remember the port: gRPC refuses getPort() once the server is down, and this is
+            // read by every dispatch and probe, including ones racing a shutdown.
+            grpcPort = progressServer.getPort();
         }
     }
 
@@ -63,11 +121,74 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
         grpcHost = host;
         grpcDirectory = new com.cs324.computation.RegistryClient(bootstrapHost, bootstrapGrpcPort);
         grpcDirectory.publish(id, host, rmiPort, getProgressPort());
+        // From here on the election wave travels over gRPC, resolved through the same directory.
+        useGrpcElectionTransport(grpcDirectory);
+        startFailoverServices();
         System.out.println("Worker " + id + " gRPC jobs and progress on port " + getProgressPort());
     }
 
+    /**
+     * Starts the failover parts: replication out, health monitoring in, and the takeover that
+     * runs when this worker wins. Called once the directory is usable, because every one of
+     * them resolves peers through it.
+     */
+    private synchronized void startFailoverServices() {
+        if (replicator != null) {
+            return;
+        }
+        replicator = new CheckpointReplicator(id, grpcDirectory, executor, this::logFailover);
+        failover = new FailoverCoordinator(id, checkpoints, replicator,
+                (job, remainingMillis) -> grpcJobs != null && grpcJobs.restore(job, remainingMillis),
+                job -> grpcJobs != null && grpcJobs.deliverResult(job.request(), job.finalResult()),
+                currentTerm::get, java.time.Duration.ofMinutes(10).toMillis(), this::logFailover);
+        probe = new GrpcCoordinatorProbe(id, grpcDirectory, currentTerm::get,
+                () -> currentCoordinatorId, this::logFailover);
+        healthMonitor = new CoordinatorHealthMonitor(id, () -> currentCoordinatorId, probe,
+                this::requestFailoverElection, this::observeLeadershipDrift, this::logFailover);
+        healthMonitor.start();
+    }
+
+    // Failover bookkeeping is operational detail; the feed keeps it, stdout stays clean.
+    private void logFailover(String message) {
+        recordEvent(WorkerEvent.FAILOVER_DETAIL, message);
+    }
+
+    /** Switches election hops to gRPC. Idempotent, so a re-published endpoint is harmless. */
+    private synchronized void useGrpcElectionTransport(com.cs324.computation.RegistryClient directory) {
+        ElectionTransport current = electionTransport;
+        if (current instanceof GrpcElectionTransport) {
+            return;
+        }
+        if (current != null) {
+            current.close();
+        }
+        electionTransport = new GrpcElectionTransport(id, directory, Constants.ELECTION_RPC_DEADLINE_MS,
+                this::logElectionTransport);
+    }
+
+    /** Lazily built so a worker without published endpoints still has a working (RMI) hop. */
+    private ElectionTransport electionTransport() {
+        ElectionTransport transport = electionTransport;
+        if (transport != null) {
+            return transport;
+        }
+        synchronized (this) {
+            transport = electionTransport;
+            if (transport == null) {
+                transport = new RmiElectionTransport(peerId -> neighbours.get(peerId), this::logElectionTransport);
+                electionTransport = transport;
+            }
+            return transport;
+        }
+    }
+
+    // Transport faults are already handled where they happen, so this only keeps the feed honest.
+    private void logElectionTransport(String message) {
+        recordEvent(WorkerEvent.ELECTION_TRANSPORT, message);
+    }
+
     @Override
-    public synchronized int getProgressPort() { return progressServer == null ? -1 : progressServer.getPort(); }
+    public synchronized int getProgressPort() { return grpcPort; }
 
     // One election wave, plus the bookkeeping needed to complete it.
     private static class ElectionState {
@@ -76,15 +197,18 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
         // Best candidate in this wave so far, compared by JAC then by id.
         int bestCandidateId;
         int bestCandidateJac;
+        // Highest term seen in this wave, so the root announces above everything it heard.
+        long maxTerm;
         // Neighbours that have not answered yet; the wave completes when this empties.
         final Set<Integer> pendingChildren = ConcurrentHashMap.newKeySet();
         // Latch so a wave echoes upward exactly once, however many triggers fire.
         boolean echoed = false;
 
-        ElectionState(int parentId, int bestCandidateId, int bestCandidateJac) {
+        ElectionState(int parentId, int bestCandidateId, int bestCandidateJac, long term) {
             this.parentId = parentId;
             this.bestCandidateId = bestCandidateId;
             this.bestCandidateJac = bestCandidateJac;
+            this.maxTerm = term;
         }
     }
 
@@ -158,8 +282,15 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     private final AtomicBoolean handoverInProgress = new AtomicBoolean(false);
 
     public WorkerRemoteImpl(int id) throws RemoteException {
-        super();
+        this(id, true);
+    }
+
+    /** RMI export exists only for historical regression fixtures, never WorkerNode. */
+    public WorkerRemoteImpl(int id, boolean exportLegacyRmi) throws RemoteException {
         this.id = id;
+        this.grpcOnly = !exportLegacyRmi;
+        this.checkpoints = new CheckpointLog(id);
+        if (exportLegacyRmi) UnicastRemoteObject.exportObject(this, 0);
     }
 
     @Override
@@ -250,9 +381,10 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
         seenMessageIds.add(messageId);
 
         int currentJac = jobAllocationCounter.get();
-        ElectionState election = new ElectionState(this.id, this.id, currentJac);
+        long term = currentTerm.get();
+        ElectionState election = new ElectionState(this.id, this.id, currentJac, term);
         recordEvent(WorkerEvent.ELECTION_STARTED,
-                "started election wave " + messageId + " (JAC " + currentJac + ")");
+                "started election wave " + messageId + " (JAC " + currentJac + ", term " + term + ")");
 
         for (Integer neighborId : neighbours.keySet()) {
             election.pendingChildren.add(neighborId);
@@ -260,13 +392,11 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
 
         elections.put(messageId, election);
 
-        List<Map.Entry<Integer, WorkerRemote>> snapshot = new ArrayList<>(neighbours.entrySet());
-        for (Map.Entry<Integer, WorkerRemote> entry : snapshot) {
-            try {
-                entry.getValue().receiveElectionMessage(this.id, this.id, currentJac, messageId);
-            } catch (RemoteException e) {
-                election.pendingChildren.remove(entry.getKey());
-                handleDeadNeighbour(entry.getKey());
+        ElectionTransport transport = electionTransport();
+        for (Integer neighborId : new ArrayList<>(neighbours.keySet())) {
+            if (!transport.sendElection(neighborId, this.id, this.id, currentJac, messageId, term)) {
+                election.pendingChildren.remove(neighborId);
+                handleDeadNeighbour(neighborId);
             }
         }
 
@@ -278,8 +408,25 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     }
 
     @Override
-    // Folds an incoming wave in: we win on lower JAC, then on higher id.
+    // Legacy RMI hop: a wave with no term keeps the previous accept-any behaviour.
     public void receiveElectionMessage(int originId, int candidateId, int candidateJac, long messageId) throws RemoteException {
+        applyElectionMessage(originId, candidateId, candidateJac, messageId, 0L);
+    }
+
+    /** gRPC wave hop; the algorithm below is the one place the protocol lives. */
+    @Override
+    public void onElectionMessage(ElectionMessage message) {
+        applyElectionMessage(message.getOriginId(), message.getCandidateId(), message.getCandidateJac(),
+                message.getMessageId(), message.getTerm());
+    }
+
+    // Folds an incoming wave in: we win on lower JAC, then on higher id.
+    private void applyElectionMessage(int originId, int candidateId, int candidateJac, long messageId, long term) {
+        // A hop below our own term belongs to a superseded wave; answering it would only
+        // revive a coordinator the cluster has already moved past.
+        if (term > 0 && term < currentTerm.get()) {
+            return;
+        }
         seenMessageIds.add(messageId);
 
         int currentJac = jobAllocationCounter.get();
@@ -308,7 +455,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
                 alreadySeen[0] = existing;
                 return existing;
             }
-            ElectionState election = new ElectionState(parentId, ourBestId, ourBestJac);
+            ElectionState election = new ElectionState(parentId, ourBestId, ourBestJac, term);
             for (Integer neighborId : neighbours.keySet()) {
                 if (neighborId != parentId) {
                     election.pendingChildren.add(neighborId);
@@ -327,12 +474,8 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
                 best[0] = seen.bestCandidateId;
                 best[1] = seen.bestCandidateJac;
             }
-            try {
-                WorkerRemote sender = neighbours.get(parentId);
-                if (sender != null) {
-                    sender.receiveEchoMessage(messageId, this.id, best[0], best[1]);
-                }
-            } catch (RemoteException ignored) {
+            ElectionTransport transport = electionTransport();
+            if (!transport.sendEcho(parentId, messageId, this.id, best[0], best[1], term)) {
                 handleDeadNeighbour(parentId);
             }
             return;
@@ -341,22 +484,17 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
         ElectionState election = created[0];
         // Lazy 2-hop seed: first wave from a new parent teaches us its neighbour set.
         if (!twoHop.containsKey(parentId)) {
-            WorkerRemote parentStub = neighbours.get(parentId);
-            if (parentStub != null) {
-                refreshTwoHop(parentId, parentStub);
-            }
+            refreshTwoHop(parentId, neighbours.get(parentId));
         }
 
         // Forward to every neighbour except the one this wave arrived from.
-        List<Map.Entry<Integer, WorkerRemote>> snapshot = new ArrayList<>(neighbours.entrySet());
-        for (Map.Entry<Integer, WorkerRemote> entry : snapshot) {
-            if (entry.getKey() != originId) {
-                try {
-                    entry.getValue().receiveElectionMessage(this.id, ourBestId, ourBestJac, messageId);
-                } catch (RemoteException e) {
+        ElectionTransport transport = electionTransport();
+        for (Integer neighborId : new ArrayList<>(neighbours.keySet())) {
+            if (neighborId != parentId) {
+                if (!transport.sendElection(neighborId, this.id, ourBestId, ourBestJac, messageId, term)) {
                     // Unreachable neighbour: stop waiting on it and rewire past it.
-                    election.pendingChildren.remove(entry.getKey());
-                    handleDeadNeighbour(entry.getKey());
+                    election.pendingChildren.remove(neighborId);
+                    handleDeadNeighbour(neighborId);
                 }
             }
         }
@@ -367,32 +505,80 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     }
 
     @Override
-    // Applies a coordinator announcement and relays it onward to the whole network.
+    // Legacy RMI announcement: no term, so it is applied exactly as it was before gRPC terms.
     public void receiveCoordinatorMessage(int coordinatorId, long messageId) throws RemoteException {
+        applyCoordinatorAnnouncement(coordinatorId, messageId, 0L);
+    }
+
+    /** gRPC announcement hop. */
+    @Override
+    public void onCoordinatorAnnouncement(CoordinatorAnnouncement announcement) {
+        applyCoordinatorAnnouncement(announcement.getCoordinatorId(), announcement.getMessageId(),
+                announcement.getTerm());
+    }
+
+    // Applies a coordinator announcement and relays it onward to the whole network.
+    private void applyCoordinatorAnnouncement(int coordinatorId, long messageId, long term) {
         // First sighting; a broadcast that loops back to us stops here.
         if (!seenCoordinatorMessageIds.add(messageId)) {
             return;
         }
-        this.currentCoordinatorId = coordinatorId;
-        handoverInProgress.set(false);
-        if (coordinatorId == this.id) {  
-           termJobsCoordinated.set(0);
+        if (!acceptLeadership(coordinatorId, term, "announced")) {
+            return;
         }
 
-        List<Map.Entry<Integer, WorkerRemote>> snapshot = new ArrayList<>(neighbours.entrySet());
-        for (Map.Entry<Integer, WorkerRemote> entry : snapshot) {
-            try {
-                entry.getValue().receiveCoordinatorMessage(coordinatorId, messageId);
-            } catch (RemoteException ignored) {
-                handleDeadNeighbour(entry.getKey());
+        ElectionTransport transport = electionTransport();
+        for (Integer neighborId : new ArrayList<>(neighbours.keySet())) {
+            if (!transport.sendAnnouncement(neighborId, coordinatorId, messageId, term)) {
+                handleDeadNeighbour(neighborId);
             }
         }
+    }
+
+    /**
+     * Decides whether an announcement may become this worker's leadership view.
+     *
+     * <p>A term-bearing announcement is applied only when (term, coordinator_id) is not older
+     * than the pair already held, ties going to the higher tuple. A term-less announcement is
+     * the legacy RMI path and is applied unconditionally, so the fallback keeps its A1 semantics:
+     * under the old contract a rotation to a lower worker id is legal, and refusing it here
+     * would silently break the five-job term.
+     */
+    private boolean acceptLeadership(int coordinatorId, long term, String cause) {
+        if (term > 0) {
+            long heldTerm = currentTerm.get();
+            if (term < heldTerm) {
+                return false;
+            }
+            if (term == heldTerm && coordinatorId <= currentCoordinatorId) {
+                return false;
+            }
+        }
+        boolean changed = this.currentCoordinatorId != coordinatorId || (term > 0 && term > currentTerm.get());
+        this.currentCoordinatorId = coordinatorId;
+        if (term > currentTerm.get()) {
+            currentTerm.set(term);
+        }
+        handoverInProgress.set(false);
+        if (coordinatorId == this.id) {
+            termJobsCoordinated.set(0);
+        }
+        if (cause.equals("announced") && coordinatorId != this.id) {
+            recordEvent(WorkerEvent.COORDINATOR_ANNOUNCED, "coordinator is now Worker " + coordinatorId
+                    + " (term " + term + ")");
+        }
+        // Winning is the moment to find out what the previous coordinator was holding.
+        if (changed && coordinatorId == this.id) {
+            takeOverLeadership();
+        }
+        return true;
     }
 
     // Local only: a joiner learned this from one peer, and relaying would read as a new term.
     public void adoptCoordinator(int coordinatorId, long messageId) {
         seenCoordinatorMessageIds.add(messageId);
         this.currentCoordinatorId = coordinatorId;
+        handoverInProgress.set(false);
         recordEvent(WorkerEvent.COORDINATOR_ADOPTED, "adopted coordinator Worker " + coordinatorId);
         if (coordinatorId == this.id) {
             termJobsCoordinated.set(0);
@@ -400,8 +586,20 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     }
 
     @Override
-    // Folds a child's answer in and completes the wave once nobody is outstanding.
+    // Legacy RMI echo hop.
     public void receiveEchoMessage(long messageId, int fromWorkerId, int bestCandidateId, int bestCandidateJac) throws RemoteException {
+        applyEchoMessage(messageId, fromWorkerId, bestCandidateId, bestCandidateJac, 0L);
+    }
+
+    /** gRPC echo hop. */
+    @Override
+    public void onEchoMessage(EchoMessage message) {
+        applyEchoMessage(message.getMessageId(), message.getFromWorkerId(), message.getBestCandidateId(),
+                message.getBestCandidateJac(), message.getTerm());
+    }
+
+    // Folds a child's answer in and completes the wave once nobody is outstanding.
+    private void applyEchoMessage(long messageId, int fromWorkerId, int bestCandidateId, int bestCandidateJac, long term) {
         ElectionState election = elections.get(messageId);
         if (election == null) {
             return;
@@ -418,6 +616,9 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
                     election.bestCandidateJac = bestCandidateJac;
                 }
             }
+            // The root announces above every term the wave saw, so its verdict cannot be
+            // mistaken for one of the older waves still echoing back.
+            election.maxTerm = Math.max(election.maxTerm, term);
 
             election.pendingChildren.remove(fromWorkerId);
 
@@ -438,36 +639,28 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
             election.echoed = true;
         }
 
+        ElectionTransport transport = electionTransport();
         // We started this wave, so we are the root and decide the outcome.
         if (election.parentId == this.id) {
-            this.currentCoordinatorId = election.bestCandidateId;
-            handoverInProgress.set(false);
-            if (election.bestCandidateId == this.id) {
-                termJobsCoordinated.set(0);
-            }
+            // One above the highest term this wave carried, so every node can order the verdict.
+            long announceTerm = Math.max(currentTerm.get(), election.maxTerm) + 1;
+            acceptLeadership(election.bestCandidateId, announceTerm, "won");
             recordEvent(WorkerEvent.COORDINATOR_ANNOUNCED, "announced coordinator Worker "
-                    + election.bestCandidateId + " (wave " + messageId + ")");
+                    + election.bestCandidateId + " (wave " + messageId + ", term " + announceTerm + ")");
             // Offset, so a coordinator announcement can never collide with an election id.
             long coordMessageId = messageId + 1000000L;
             // Record before broadcasting, or our own announcement returns and resets the term.
             seenCoordinatorMessageIds.add(coordMessageId);
-            List<Map.Entry<Integer, WorkerRemote>> snapshot = new ArrayList<>(neighbours.entrySet());
-            for (Map.Entry<Integer, WorkerRemote> entry : snapshot) {
-                try {
-                    entry.getValue().receiveCoordinatorMessage(election.bestCandidateId, coordMessageId);
-                } catch (RemoteException ignored) {
-                    handleDeadNeighbour(entry.getKey());
+            for (Integer neighborId : new ArrayList<>(neighbours.keySet())) {
+                if (!transport.sendAnnouncement(neighborId, election.bestCandidateId, coordMessageId, announceTerm)) {
+                    handleDeadNeighbour(neighborId);
                 }
             }
         } else {
             // Send our merged best back to the node that forwarded this wave.
-            WorkerRemote parentStub = neighbours.get(election.parentId);
-            if (parentStub != null) {
-                try {
-                    parentStub.receiveEchoMessage(messageId, this.id, election.bestCandidateId, election.bestCandidateJac);
-                } catch (RemoteException ignored) {
-                    handleDeadNeighbour(election.parentId);
-                }
+            if (!transport.sendEcho(election.parentId, messageId, this.id,
+                    election.bestCandidateId, election.bestCandidateJac, election.maxTerm)) {
+                handleDeadNeighbour(election.parentId);
             }
         }
     }
@@ -475,6 +668,7 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     @Override
     // Adds a peer by looking up its registry stub; also used for the reverse edge.
     public void connectAsNeighbour(int newWorker, String rmiHost, int rmiPort) throws RemoteException {
+        if (grpcOnly) { connectGrpcNeighbour(newWorker); return; }
         try {
             Registry registry = LocateRegistry.getRegistry(rmiHost, rmiPort);
             WorkerRemote stub = (WorkerRemote) registry.lookup("Worker" + newWorker);
@@ -485,6 +679,21 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
         } catch (NotBoundException e) {
             throw new RemoteException("Failed to look up new neighbour", e);
         }
+    }
+
+    public void connectGrpcNeighbour(int peerId) throws RemoteException {
+        if (peerId == id) return;
+        if (grpcDirectory == null) throw new RemoteException("gRPC discovery is not ready");
+        var peer = new com.cs324.computation.GrpcWorkerClient(grpcDirectory.worker(peerId));
+        var status = peer.status();
+        if (status.getWorkerId() != peerId) throw new RemoteException("Peer identity mismatch");
+        neighbours.put(peerId, peer);
+        twoHop.put(peerId, Set.copyOf(status.getNeighbourIdsList()));
+        recordEvent(WorkerEvent.NEIGHBOUR_ADDED, "linked Worker " + peerId + " via gRPC");
+    }
+
+    public void adoptGrpcCoordinator(int coordinatorId, long term) {
+        if (coordinatorId > 0) acceptLeadership(coordinatorId, term, "adopted");
     }
 
     @Override
@@ -498,6 +707,10 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
 
     // Best-effort fetch of a neighbour's neighbour set; a failure means the peer just died.
     private void refreshTwoHop(int neighbourId, WorkerRemote stub) {
+        if (stub == null) {
+            // No stub means no link to learn from, which is not a failure to report.
+            return;
+        }
         try {
             Set<Integer> ids = stub.getNeighbourIds();
             if (ids != null) {
@@ -571,8 +784,14 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
             if (address == null) {
                 return false;
             }
-            Registry registry = LocateRegistry.getRegistry(address.getRmiHost(), address.getRmiPort());
-            WorkerRemote stub = (WorkerRemote) registry.lookup("Worker" + candidate);
+            WorkerRemote stub;
+            if (grpcOnly) {
+                stub = new com.cs324.computation.GrpcWorkerClient(grpcDirectory.worker(candidate));
+                stub.ping();
+            } else {
+                Registry registry = LocateRegistry.getRegistry(address.getRmiHost(), address.getRmiPort());
+                stub = (WorkerRemote) registry.lookup("Worker" + candidate);
+            }
             neighbours.put(candidate, stub);
             refreshTwoHop(candidate, stub);
             recordEvent(WorkerEvent.NEIGHBOUR_ADDED,
@@ -917,8 +1136,190 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     public void setBootstrapReference(BootstrapRemote bootstrap, String localHost) {
         this.bootstrap = bootstrap;
         this.localHost = localHost;
-        heartbeatExecutor.scheduleAtFixedRate(this::heartbeatTick,
-                Constants.HEARTBEAT_INTERVAL_MS, Constants.HEARTBEAT_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        if (Constants.LEGACY_RMI_HEARTBEAT_ENABLED) {
+            // Reference implementation only: the gRPC health monitor is the cluster's single
+            // failure detector, and two detectors race to start elections.
+            heartbeatExecutor.scheduleAtFixedRate(this::heartbeatTick,
+                    Constants.HEARTBEAT_INTERVAL_MS, Constants.HEARTBEAT_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    /** This worker's own leadership view, sent as the reply to a follower probing it. */
+    @Override
+    public HeartbeatReply heartbeat(int fromWorkerId, long followerTerm, int followerCoordinatorId) {
+        return HeartbeatReply.newBuilder()
+                .setTerm(currentTerm.get())
+                .setCoordinatorId(currentCoordinatorId)
+                .setIsCoordinator(currentCoordinatorId == id)
+                .build();
+    }
+
+    /** Folds entries a coordinator replicated to us; the sequence and term rules do the work. */
+    @Override
+    public long acceptEntries(int coordinatorId, long term, List<CheckpointEntry> entries) {
+        long highest = 0L;
+        for (CheckpointEntry entry : entries) {
+            if (checkpoints.apply(entry)) {
+                highest = Math.max(highest, entry.getSequence());
+            } else {
+                // Duplicate or stale: acknowledging it is still correct, because the replica
+                // already holds that state and the sender must not resend it forever.
+                highest = Math.max(highest, checkpoints.job(entry.getJobId()) == null
+                        ? 0L : checkpoints.job(entry.getJobId()).sequence());
+            }
+        }
+        return highest;
+    }
+
+    /** Include retained terminal markers so a stale survivor never resurrects a finished job. */
+    @Override
+    public List<CheckpointEntry> snapshots() {
+        List<CheckpointEntry> entries = new ArrayList<>();
+        for (int jobId : checkpoints.jobIds()) {
+            entries.addAll(checkpoints.snapshot(jobId));
+        }
+        return entries;
+    }
+
+    /** The local replica, for tests and for the takeover's own merge. */
+    public CheckpointLog checkpointLog() {
+        return checkpoints;
+    }
+
+    /**
+     * Reacts to a coordinator this worker has decided is FAILED: one wave per failure, jittered.
+     *
+     * <p>The suppression is keyed on (coordinator, when) rather than on a wave counter, because
+     * the whole point is that several workers notice the same death within a few hundred
+     * milliseconds of each other and must not each start their own. Keying on the coordinator
+     * id alone would be wrong in the other direction: the same worker failing again much later
+     * is a new failure and must still be able to elect.
+     */
+    private void requestFailoverElection(int failedCoordinator) {
+        if (!failureGate.shouldElect(failedCoordinator)) {
+            return;
+        }
+        long jitter = Constants.FAILOVER_ELECTION_JITTER_MS <= 0 ? 0
+                : (long) (Math.random() * Constants.FAILOVER_ELECTION_JITTER_MS);
+        recordEvent(WorkerEvent.FAILOVER_STARTED, "coordinator Worker " + failedCoordinator
+                + " declared failed; starting an election in " + jitter + "ms");
+        try {
+            if (jitter > 0) {
+                Thread.sleep(jitter);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return;
+        }
+        startElection();
+    }
+
+/**
+     * Acts on a heartbeat reply that contradicts this worker's leadership view: either the peer
+     * reports a newer term, or it says it is not the coordinator any more. Both mean the cluster
+     * has already moved on, so the view is adopted instead of starting an election nobody needs.
+     * That is also what makes a deposed coordinator step down instead of serving a lost term.
+     */
+    private void observeLeadershipDrift(CoordinatorHealthMonitor.ProbeResult view) {
+        long peerTerm = view.term() == null ? 0L : view.term();
+        LeaderView.Decision decision = LeaderView.decide(currentTerm.get(), currentCoordinatorId,
+                peerTerm, view.coordinatorIdView(), view.isCoordinator());
+        if (!decision.adopt()) {
+            return;
+        }
+        boolean wasCoordinator = currentCoordinatorId == id;
+        if (acceptLeadership(decision.coordinatorId(), decision.term(), "drift")
+                && wasCoordinator && decision.coordinatorId() != id) {
+            recordEvent(WorkerEvent.LEADERSHIP_STEP_DOWN, "Worker " + id + " stepped down for Worker "
+                    + decision.coordinatorId() + " at term " + decision.term());
+        }
+    }
+
+    /**
+     * Runs when this worker becomes coordinator: merge every reachable replica, then rebuild
+     * the jobs whose owner died. Idempotent per job and term, and guarded so no new job is
+     * accepted while the merge is in flight.
+     */
+    private void takeOverLeadership() {
+        if (failover == null) {
+            return;
+        }
+        failoverInProgress.set(true);
+        try {
+            executor.execute(() -> {
+                try {
+                    failover.takeOver();
+                } catch (RuntimeException e) {
+                    recordEvent(WorkerEvent.FAILOVER_COMPLETED, "takeover stopped early: " + e.getMessage());
+                } finally {
+                    failoverInProgress.set(false);
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            // Shutting down: the next election will take over instead.
+            failoverInProgress.set(false);
+        }
+    }
+
+    /**
+     * Writes this coordinator's job transitions into the local replica and out to the peers.
+     *
+     * <p>Acceptance is the only entry that waits for a peer, because that is the one the client
+     * acknowledgement depends on; everything else is best effort and asynchronous.
+     */
+    private final class ReplicatingCheckpointSink implements CheckpointSink {
+
+        @Override
+        public void onAccepted(com.cs324.job.proto.SubmitJobRequest request,
+                List<SliceSnapshot> slices, long acceptedAtMillis) {
+            write(() -> checkpoints.acceptedEntry(request, slices, acceptedAtMillis,
+                    currentTerm.get(), id), true);
+        }
+
+        @Override
+        public void onSliceUpdated(int jobId, int taskId, com.cs324.registry.proto.WorkerEndpoint owner,
+                int attempt, TaskResult result) {
+            write(() -> checkpoints.sliceEntry(jobId, taskId, owner, attempt, result, currentTerm.get(), id), false);
+        }
+
+        @Override
+        public void onFinished(int jobId, TaskResult result) {
+            write(() -> checkpoints.finishedEntry(jobId, result, false, currentTerm.get(), id), false);
+        }
+
+        @Override
+        public void onDelivered(int jobId) {
+            write(() -> {
+                JobCheckpoint job = checkpoints.job(jobId);
+                return job != null && job.finished()
+                        ? checkpoints.finishedEntry(jobId, job.finalResult(), true, currentTerm.get(), id) : null;
+            }, false);
+        }
+
+        @Override
+        public void onDeliveryFailed(int jobId) {
+            checkpoints.markDelivered(jobId, false);
+        }
+
+        private void write(java.util.function.Supplier<CheckpointEntry> create, boolean waitForPeer) {
+            CheckpointEntry entry;
+            List<CheckpointEntry> snapshot;
+            synchronized (checkpoints) {
+                entry = create.get();
+                if (entry == null) return;
+                checkpoints.apply(entry);
+                snapshot = checkpoints.snapshot(entry.getJobId());
+            }
+            CheckpointReplicator active = replicator;
+            if (active == null) {
+                return;
+            }
+            // Independent asynchronous RPCs may overtake one another. Every push
+            // carries cumulative state, so a newer sequence subsumes older updates.
+            active.replicate(snapshot, entry.getTerm(), waitForPeer);
+            recordEvent(WorkerEvent.CHECKPOINT_REPLICATED, "job " + entry.getJobId() + " sequence "
+                    + entry.getSequence() + " (" + entry.getEntryCase() + ")");
+        }
     }
 
     @Override
@@ -980,6 +1381,11 @@ public class WorkerRemoteImpl extends UnicastRemoteObject implements WorkerRemot
     public void shutdown() {
         if (grpcJobs != null) grpcJobs.close();
         if (grpcDirectory != null) grpcDirectory.close();
+        if (healthMonitor != null) healthMonitor.close();
+        if (probe != null) probe.close();
+        if (replicator != null) replicator.close();
+        ElectionTransport transport = electionTransport;
+        if (transport != null) transport.close();
         if (progressServer != null) progressServer.shutdownNow();
         executor.shutdown();
         heartbeatExecutor.shutdown();

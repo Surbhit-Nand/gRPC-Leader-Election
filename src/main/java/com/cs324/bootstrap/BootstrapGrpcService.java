@@ -46,10 +46,8 @@ public class BootstrapGrpcService extends RegistryServiceGrpc.RegistryServiceImp
                 responseObserver.onCompleted();
                 return;
             }
-            RegistrationRecord record = request.getAutoAssign()
-                    ? directory.registerAutoRecord(request.getHost(), request.getPort())
-                    : directory.registerRecord(
-                            request.getWorkerId(), request.getHost(), request.getPort());
+            RegistrationRecord record = directory.registerGrpcRecord(request.getWorkerId(),
+                    request.getAutoAssign(), request.getHost(), request.getPort());
             if (request.getGrpcPort() > 0)
                 directory.publishGrpcEndpoint(record.workerId(), request.getHost(), request.getPort(), request.getGrpcPort());
             RegisterResponse.Builder reply = RegisterResponse.newBuilder()
