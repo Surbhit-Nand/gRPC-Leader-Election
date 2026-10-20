@@ -1,22 +1,6 @@
 package com.cs324.failover;
 
-/**
- * The liveness rule for one watched coordinator, with no I/O in it, so the thresholds can be
- * reasoned about and unit-tested on their own.
- *
- * <p>The distinction the class exists to make: a coordinator that is <em>slow</em> is not a
- * coordinator that is <em>gone</em>. A slow one still answers, so it proves it is alive and
- * must never cost the cluster an election; only repeated silence, or silence for long enough
- * that an earlier success cannot vouch for it, counts as failure.
- *
- * <pre>
- *   ALIVE    - last probe answered inside the slow threshold
- *   SUSPECT  - answered but slowly, or one probe missed
- *   FAILED   - {@code failureThreshold} consecutive misses, or no success within the silence window
- * </pre>
- *
- * <p>Instances are confined to the monitor thread.
- */
+// Track probe latency and silence on the monitor thread; only repeated misses or prolonged silence fail.
 public final class CoordinatorHealth {
 
     public enum State { ALIVE, SUSPECT, FAILED }
@@ -52,7 +36,7 @@ public final class CoordinatorHealth {
         return consecutiveMisses;
     }
 
-    /** Points the monitor at a (possibly new) coordinator, forgetting the previous verdict. */
+    // Points the monitor at a (possibly new) coordinator, forgetting the previous verdict.
     public void watch(int coordinatorId) {
         if (coordinatorId != watchedId) {
             watchedId = coordinatorId;
@@ -60,15 +44,7 @@ public final class CoordinatorHealth {
         }
     }
 
-    /**
-     * Records an answered probe.
-     *
-     * <p>Any answer clears the miss streak, because the coordinator proved it is reachable. A
-     * slow answer moves it to {@code SUSPECT} rather than {@code ALIVE}, which is what lets a
-     * recovering-but-struggling coordinator be visible in the feed without triggering anything.
-     *
-     * @return the state after the update.
-     */
+    // Clear missed probes on any reply; a slow reply marks the coordinator suspect, not failed.
     public State recordSuccess(int coordinatorId, long latencyMillis, long nowMillis) {
         watch(coordinatorId);
         consecutiveMisses = 0;
@@ -78,12 +54,7 @@ public final class CoordinatorHealth {
         return state;
     }
 
-    /**
-     * Records a probe that did not complete: a timeout, an unreachable endpoint, or a
-     * coordinator this worker cannot even resolve.
-     *
-     * @return the state after the update.
-     */
+    // Record a missed probe and return the updated health state.
     public State recordMiss(int coordinatorId, long nowMillis) {
         watch(coordinatorId);
         consecutiveMisses++;
@@ -95,13 +66,7 @@ public final class CoordinatorHealth {
         return evaluate(nowMillis);
     }
 
-    /**
-     * Applies the silence window: a coordinator that has not answered for longer than the
-     * window is failed regardless of the streak, because an old success cannot vouch for a
-     * peer that has since gone quiet.
-     *
-     * @return the state after the check.
-     */
+    // Declare failure when the silence window expires, even without enough consecutive misses.
     public State evaluate(long nowMillis) {
         if (state == State.FAILED) {
             return state;
@@ -112,7 +77,7 @@ public final class CoordinatorHealth {
         return state;
     }
 
-    /** True on the transition into FAILED, which is the only moment an election may start. */
+    // True on the transition into FAILED, which is the only moment an election may start.
     public boolean justFailed(State previous) {
         return previous != State.FAILED && state == State.FAILED;
     }

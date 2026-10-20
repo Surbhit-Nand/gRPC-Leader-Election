@@ -8,7 +8,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
 
-/** Owns progress streams; all Swing state is changed on the event thread. */
+// Owns progress streams; all Swing state is changed on the event thread.
 final class JobProgressView implements AutoCloseable {
     private final DefaultTableModel jobs;
     private final Map<Integer, JobProgress> snapshots = new HashMap<>();

@@ -1,10 +1,6 @@
 package com.cs324.client;
 
-// Pre-submit cost warning for prime-range jobs. Pure logic, no Swing, so the
-// tier boundaries are unit-tested headlessly; ClientApp only shows the dialog.
-// Only PRIMESUM reaches workers as a range (ClientApp builds PrimeRange solely
-// for it); MAX/PRIMECOUNT travel as lists and need no width warning.
-// This warns, never refuses: every width up to the int limits works, slowly.
+// Warn before expensive PRIMESUM ranges; validation remains separate from this optional warning.
 public final class RangeWarning {
 
     // Quiet below this width: seconds on a normal cluster, not worth a popup.
@@ -14,8 +10,7 @@ public final class RangeWarning {
 
     private RangeWarning() {}
 
-    // Null when no dialog is needed; otherwise the confirm-dialog message.
-    // Callers must have validated the shape already (exactly two ascending values).
+    // Return a warning or null; callers must first validate the two ascending range bounds.
     public static String warningFor(String operation, long[] values) {
         if (!"PRIMESUM".equals(operation) || values == null || values.length != 2) {
             return null;

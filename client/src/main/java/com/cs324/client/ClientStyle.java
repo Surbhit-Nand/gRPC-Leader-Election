@@ -283,7 +283,7 @@ final class ClientStyle {
         });
     }
 
-    /** A real cell editor makes the action usable by mouse and keyboard. */
+    // A real cell editor makes the action usable by mouse and keyboard.
     static void installDetailsAction(JTable table, int column, java.util.function.IntConsumer action) {
         table.getColumnModel().getColumn(column).setCellRenderer((t, value, selected, focus, row, col) -> {
             JPanel cell = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 3));
@@ -343,7 +343,7 @@ final class ClientStyle {
         }
     }
 
-    /** Status text is retained alongside colour for accessibility. */
+    // Status text is retained alongside colour for accessibility.
     static final class StatusRenderer extends JPanel implements javax.swing.table.TableCellRenderer {
         private String text = "";
         private Color foreground;

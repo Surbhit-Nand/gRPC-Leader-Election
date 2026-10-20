@@ -24,17 +24,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
-/**
- * Ships this coordinator's log entries to every ready peer, and reads theirs back when a
- * takeover needs one.
- *
- * <p>Every published peer is offered a cumulative snapshot. Acceptance requires at least one
- * peer to acknowledge its sequence within the deadline. A peerless cluster refuses new jobs.
- * Slice updates and completion remain asynchronous; takeover can recompute unfinished work.
- *
- * <p>One channel per peer is cached, as in the election transport, and every call carries a
- * deadline so a silent peer can never block the coordinator's own thread.
- */
+// Replicate cumulative job snapshots to peers and fetch their state during takeover.
 public final class CheckpointReplicator implements CheckpointSource, AutoCloseable {
 
     private record Peer(String host, int port, ManagedChannel channel) {}
@@ -53,21 +43,7 @@ public final class CheckpointReplicator implements CheckpointSource, AutoCloseab
         this.log = log;
     }
 
-    /**
-     * Puts one entry on every ready peer.
-     *
-     * <p>Every peer is always asked: a replica that missed the acceptance could never fold a
-     * later delta (a delta carries no input), so a partial push would silently remove that peer
-     * from the set of workers that can take over this job.
-     *
-     * <p>{@code waitForAck} is used for acceptance, where the client's acknowledgement depends
-     * on the entry having landed somewhere. It waits for the <em>first</em> acknowledgement up to
-     * a deadline rather than for all of them, so one slow peer cannot hold up a submission; the
-     * remaining peers are still being written to in the background.
-     *
-     * @return for acceptance, true only after a peer confirms the requested sequence;
-     *         for asynchronous updates, true when pushes were scheduled.
-     */
+    // Push to all ready peers; waitForAck requires one peer to confirm the sequence before the deadline.
     public boolean replicate(List<CheckpointEntry> entries, long term, boolean waitForAck) {
         if (entries.isEmpty()) return true;
         if (closed.get()) return false;
@@ -103,7 +79,7 @@ public final class CheckpointReplicator implements CheckpointSource, AutoCloseab
         return true;
     }
 
-    /** Asynchronous single-peer push; failures are logged and dropped on purpose. */
+    // Send a bounded RPC to one peer and return whether it confirmed the requested sequence.
     private boolean send(WorkerEndpoint target, List<CheckpointEntry> entries, long term) {
         return send(target, entries, term, Constants.FAILOVER_REPLICATION_RPC_DEADLINE_MS);
     }
@@ -134,18 +110,9 @@ public final class CheckpointReplicator implements CheckpointSource, AutoCloseab
         }
     }
 
-    /**
-     * Reads one peer's log. Called during takeover for every reachable worker; a peer that
-     * cannot answer is simply one fewer source, never a failed takeover.
-     */
+    // Fetch a peer snapshot during takeover; unreachable peers contribute no state.
     @Override
-    /**
-     * Reads one peer's log. Called during takeover for every reachable worker; a peer that
-     * cannot answer is one fewer source, never a failed takeover - and it is also how the
-     * takeover learns that the peer is gone.
-     *
-     * @return the peer's entries, or null when the peer did not answer.
-     */
+    // Fetch a peer snapshot; null means unreachable, while an empty list means no retained jobs.
     public FetchReply fetch(WorkerEndpoint target) {
         try {
             FetchReply reply = FailoverServiceGrpc.newBlockingStub(channelFor(target))
@@ -181,7 +148,7 @@ public final class CheckpointReplicator implements CheckpointSource, AutoCloseab
         return ready;
     }
 
-    /** Cached channel per peer; a peer that changed port gets a fresh one on the next call. */
+    // Cached channel per peer; a peer that changed port gets a fresh one on the next call.
     private synchronized ManagedChannel channelFor(WorkerEndpoint endpoint) {
         if (closed.get()) throw new IllegalStateException("Checkpoint replicator is closed");
         Peer cached = peers.get(endpoint.getWorkerId());
@@ -199,7 +166,7 @@ public final class CheckpointReplicator implements CheckpointSource, AutoCloseab
         return created.channel;
     }
 
-    /** Drops a peer's cached channel when it looks gone rather than merely slow. */
+    // Drops a peer's cached channel when it looks gone rather than merely slow.
     private void forget(int peerId, StatusRuntimeException error) {
         Status.Code code = error.getStatus().getCode();
         if (code == Status.Code.UNAVAILABLE || code == Status.Code.UNKNOWN || code == Status.Code.INTERNAL) {
@@ -210,7 +177,7 @@ public final class CheckpointReplicator implements CheckpointSource, AutoCloseab
         }
     }
 
-    /** Releases every cached channel; the coordinator cannot replicate after this. */
+    // Releases every cached channel; the coordinator cannot replicate after this.
     @Override
     public synchronized void close() {
         if (!closed.compareAndSet(false, true)) {

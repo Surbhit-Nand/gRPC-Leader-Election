@@ -12,7 +12,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** One bounded status probe per peer, used by the quorum monitor to test reachability. */
+// One bounded status probe per peer, used by the quorum monitor to test reachability.
 final class QuorumProbe implements AutoCloseable {
 
     private final RegistryClient directory;

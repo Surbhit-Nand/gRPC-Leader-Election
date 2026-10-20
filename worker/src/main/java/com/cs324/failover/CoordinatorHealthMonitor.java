@@ -12,25 +12,16 @@ import java.util.function.Consumer;
 import java.util.function.IntConsumer;
 import java.util.function.IntSupplier;
 
-/**
- * Drives {@link CoordinatorHealth} against the coordinator this worker believes in.
- *
- * <p>This is the cluster's single failure detector. It uses bounded gRPC probes and suppresses
- * repeated election requests for the same failure.
- *
- * <p>Only the transition into FAILED calls {@code onFailed}. A slow coordinator is logged and
- * left alone, and a coordinator that recovers from SUSPECT goes back to ALIVE without anything
- * being elected.
- */
+// Probe the coordinator and trigger recovery only on a transition to failed.
 public final class CoordinatorHealthMonitor implements AutoCloseable {
 
-    /** One probe to a coordinator; returning null means the probe did not complete. */
+    // One probe to a coordinator; returning null means the probe did not complete.
     public interface Probe {
-        /** @return latency plus the responder's view, or null when the probe failed. */
+        // Returns latency plus the responder's view, or null when the probe failed.
         ProbeResult send(int coordinatorId);
     }
 
-    /** What one probe learned: how long it took, and what the responder believes. */
+    // What one probe learned: how long it took, and what the responder believes.
     public record ProbeResult(long latencyMillis, Long term, int coordinatorIdView, boolean isCoordinator) {}
 
     private final int selfId;
@@ -68,7 +59,7 @@ public final class CoordinatorHealthMonitor implements AutoCloseable {
         });
     }
 
-    /** The last verdict, so the feed and tests can read the machine's own view. */
+    // The last verdict, so the feed and tests can read the machine's own view.
     public CoordinatorHealth.State state() {
         return health.state();
     }
@@ -79,10 +70,7 @@ public final class CoordinatorHealthMonitor implements AutoCloseable {
                 Constants.FAILOVER_HEARTBEAT_INTERVAL_MS, TimeUnit.MILLISECONDS);
     }
 
-    /**
-     * One detection cycle. Package-visible so a test can step the machine without waiting for
-     * the scheduler.
-     */
+    // One detection cycle. Package-visible so a test can step the machine without waiting for the scheduler.
     void tick() {
         if (closed.get()) {
             return;
@@ -126,7 +114,7 @@ public final class CoordinatorHealthMonitor implements AutoCloseable {
         }
     }
 
-    /** Keeps the feed readable: only transitions are worth a line, not every probe. */
+    // Keeps the feed readable: only transitions are worth a line, not every probe.
     private void report(CoordinatorHealth.State previous, CoordinatorHealth.State state,
             int coordinator, long latencyMillis) {
         if (state == previous) {
@@ -148,12 +136,7 @@ public final class CoordinatorHealthMonitor implements AutoCloseable {
         }
     }
 
-    /**
-     * A reply also carries the responder's own view, and that view can contradict what this
-     * worker believes: the peer it is probing may say it is not the coordinator any more, or may
-     * report a newer generation. Both mean the cluster has moved on, and the cheap correct
-     * action is to adopt that view rather than start an election nobody needs.
-     */
+    // Adopt a newer reported leadership view instead of starting an unnecessary election.
     private void observeLeadership(int coordinator, ProbeResult result) {
         if (result.term() != null && result.term() > 0) {
             onLeadershipDrift.accept(result);

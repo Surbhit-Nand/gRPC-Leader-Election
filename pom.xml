@@ -32,15 +32,7 @@
     <build>
         <pluginManagement>
         <plugins>
-            <!--
-                os-maven-plugin runs as a lifecycle plugin, not a build <extension>.
-                m2e (the engine behind the VS Code / Eclipse Java language server) does
-                not evaluate build extensions, so as an <extension>
-                ${os.detected.classifier} stayed literal and the protobuf plugin failed
-                with "Unable to resolve artifact: com.google.protobuf:protoc:exe:${os.detected.classifier}".
-                Bound to initialize, detect runs before protobuf:compile in
-                generate-sources for both the CLI and m2e, so the classifier resolves.
-            -->
+            <!-- Detect the native classifier before protobuf generation, including in Eclipse and VS Code. -->
             <plugin>
                 <groupId>kr.motd.maven</groupId><artifactId>os-maven-plugin</artifactId><version>1.7.1</version>
                 <executions>
@@ -60,16 +52,7 @@
                 </configuration>
                 <executions><execution><goals><goal>compile</goal><goal>compile-custom</goal></goals></execution></executions>
             </plugin>
-            <!--
-                Register the protobuf/grpc-stub output as compile sources. The
-                protobuf plugin adds these roots at runtime, but the VS Code /
-                Eclipse Java language server (m2e) does not always pick up
-                runtime source roots, which surfaced as
-                "cannot find symbol ... package com.cs324.registry.proto".
-                build-helper:add-source is a well-known goal that m2e maps out of
-                the box, so the IDE resolves the generated classes. Declared after
-                the protobuf plugin so the directories exist when this runs.
-            -->
+            <!-- Register generated protobuf sources explicitly so IDEs resolve them. -->
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>build-helper-maven-plugin</artifactId>
@@ -113,7 +96,7 @@
         </plugins>
         </pluginManagement>
         <plugins>
-            <!-- Aggregate coverage is published under each module's target/site/jacoco. -->
+            <!-- Coverage is published under each module's target/site/jacoco. -->
             <plugin>
                 <groupId>org.jacoco</groupId>
                 <artifactId>jacoco-maven-plugin</artifactId>
@@ -132,11 +115,7 @@
             </plugin>
         </plugins>
     </build>
-    <!--
-        Convenience profiles: each one only sets the default main class for that
-        node. With no arguments the CLIs use localhost and gRPC port 50051.
-        A command line -Dexec.mainClass / -Dexec.args always overrides a profile.
-    -->
+    <!-- Profiles select a default main class; command-line exec properties can override it. -->
     <profiles>
         <profile>
             <id>client</id>

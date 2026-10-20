@@ -19,20 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * This worker's replica of the coordinator's job log: an append-only sequence of
- * entries folded into one table per job.
- *
- * <p>Folding is idempotent and order-insensitive by construction. An entry is applied only
- * when its per-job sequence is newer than what the replica holds, and only when its term is
- * not older, so a duplicate, a late arrival or a write from a deposed coordinator is ignored
- * instead of applied twice. That single rule is what makes it safe to replicate to every peer
- * and to re-fetch everything during takeover.
- *
- * <p>Sequences are comparable across coordinators because a takeover continues the sequence
- * space it merged: the new coordinator's first entry sits above the highest sequence any
- * survivor already holds.
- */
+// Fold job checkpoints only when their sequence advances and their term is not older.
 public final class CheckpointLog {
 
     private final int replicaId;
@@ -48,12 +35,7 @@ public final class CheckpointLog {
         return replicaId;
     }
 
-    /**
-     * Folds one replicated entry.
-     *
-     * @return true when the entry advanced this replica, false when it was stale, duplicated,
-     *         or belonged to an older term.
-     */
+    // Return true only when the entry advances the replica state.
     public synchronized boolean apply(CheckpointEntry entry) {
         int jobId = entry.getJobId();
         if (jobId < 1 || entry.getEntryCase() == CheckpointEntry.EntryCase.ENTRY_NOT_SET) {
@@ -65,14 +47,12 @@ public final class CheckpointLog {
             if (entry.getTerm() < job.term()) {
                 return false;
             }
-            // Sequence decides within a term and carries across terms, so a resumed sequence
-            // space can never rewind and replay an old transition.
+            // Sequence decides within a term and carries across terms, so a resumed sequence space can never rewind and replay an old transition.
             if (entry.getSequence() <= job.sequence()) {
                 return false;
             }
         } else if (entry.getEntryCase() != CheckpointEntry.EntryCase.ACCEPTED) {
-            // A delta or a tombstone for a job this replica never saw accepted carries no
-            // input, so nothing here could be rebuilt from it.
+            // A delta or a tombstone for a job this replica never saw accepted carries no input, so nothing here could be rebuilt from it.
             return false;
         }
         if (job == null) {
@@ -87,8 +67,7 @@ public final class CheckpointLog {
             jobs.put(jobId, job);
         } else {
             switch (entry.getEntryCase()) {
-                // A snapshot replaces the table wholesale, which is how FetchCheckpoints
-                // hands over a job whose slices moved on since acceptance.
+                // A snapshot replaces the table wholesale, which is how FetchCheckpoints hands over a job whose slices moved on since acceptance.
                 case ACCEPTED -> job.replaceSlices(entry.getAccepted().getSlicesList());
                 case SLICE -> job.applySliceDelta(entry.getSlice());
                 case FINISHED -> job.markFinished(entry.getFinished().getResult(),
@@ -101,7 +80,7 @@ public final class CheckpointLog {
         return true;
     }
 
-    /** Every job this replica can still rebuild: unfinished, or finished but undelivered. */
+    // Every job this replica can still rebuild: unfinished, or finished but undelivered.
     public synchronized Collection<JobCheckpoint> recoverable() {
         List<JobCheckpoint> recoverable = new ArrayList<>();
         for (JobCheckpoint job : jobs.values()) {
@@ -121,13 +100,13 @@ public final class CheckpointLog {
         return jobs.size();
     }
 
-    /** Next sequence for a job this replica coordinates: strictly above everything folded in. */
+    // Next sequence for a job this replica coordinates: strictly above everything folded in.
     public synchronized long nextSequence(int jobId) {
         JobCheckpoint job = jobs.get(jobId);
         return job == null ? 1L : job.sequence() + 1;
     }
 
-    /** Builds the entry that records a job acceptance. */
+    // Builds the entry that records a job acceptance.
     public CheckpointEntry acceptedEntry(SubmitJobRequest request, List<CheckpointSink.SliceSnapshot> slices,
             long acceptedAtMillis, long term, int coordinatorId) {
         JobAccepted.Builder accepted = JobAccepted.newBuilder()
@@ -147,7 +126,7 @@ public final class CheckpointLog {
                 .build();
     }
 
-    /** Builds a slice delta. Unset fields mean "unchanged" on the receiving replica. */
+    // Builds a slice delta. Unset fields mean "unchanged" on the receiving replica.
     public CheckpointEntry sliceEntry(int jobId, int taskId, WorkerEndpoint owner, int attempt,
             TaskResult result, long term, int coordinatorId) {
         SliceUpdated.Builder update = SliceUpdated.newBuilder().setTaskId(taskId);
@@ -169,7 +148,7 @@ public final class CheckpointLog {
                 .build();
     }
 
-    /** Builds the tombstone that stops a finished job from being rebuilt. */
+    // Builds the tombstone that stops a finished job from being rebuilt.
     public CheckpointEntry finishedEntry(int jobId, TaskResult result, boolean delivered,
             long term, int coordinatorId) {
         return CheckpointEntry.newBuilder()
@@ -181,14 +160,7 @@ public final class CheckpointLog {
                 .build();
     }
 
-    /**
-     * This replica's view of one job as entries a peer can fold: at most one accepted entry
-     * carrying the current slice table, plus a tombstone when the job already ended.
-     *
-     * <p>Both entries carry the coordinator that <em>accepted</em> the job, not the replica
-     * serving them. A survivor decides whether to rebuild a job from that id, so a snapshot
-     * that renamed the owner would make every job look abandoned.
-     */
+    // Export current slices and any terminal marker while preserving the job owner.
     public synchronized List<CheckpointEntry> snapshot(int jobId) {
         JobCheckpoint job = jobs.get(jobId);
         if (job == null) {
@@ -197,8 +169,7 @@ public final class CheckpointLog {
         List<CheckpointEntry> entries = new ArrayList<>(2);
         entries.add(CheckpointEntry.newBuilder()
                 .setJobId(jobId)
-                // A terminal snapshot needs two entries, but neither may invent a
-                // future sequence or the next real delivery update will be dropped.
+                // A terminal snapshot needs two entries, but neither may invent a future sequence or the next real delivery update will be dropped.
                 .setSequence(job.finished() ? job.sequence() - 1 : job.sequence())
                 .setTerm(job.term())
                 .setCoordinatorId(job.acceptedBy())
@@ -221,7 +192,7 @@ public final class CheckpointLog {
         return entries;
     }
 
-    /** Marks a job's client callback as acknowledged, so a later takeover will not replay it. */
+    // Marks a job's client callback as acknowledged, so a later takeover will not replay it.
     public synchronized void markDelivered(int jobId, boolean delivered) {
         JobCheckpoint job = jobs.get(jobId);
         if (job != null) {
@@ -229,14 +200,14 @@ public final class CheckpointLog {
         }
     }
 
-    /** Job ids in ascending order, so a takeover walks the log deterministically. */
+    // Job ids in ascending order, so a takeover walks the log deterministically.
     public List<Integer> jobIds() {
         List<Integer> ids = new ArrayList<>(jobs.keySet());
         ids.sort(Comparator.naturalOrder());
         return ids;
     }
 
-    /** Drops the oldest finished jobs once retention is exceeded. */
+    // Drops the oldest finished jobs once retention is exceeded.
     private void retain(JobCheckpoint job) {
         if (!job.finished()) {
             return;

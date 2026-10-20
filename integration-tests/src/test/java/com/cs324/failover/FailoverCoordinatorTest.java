@@ -21,19 +21,13 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * The takeover's decisions, with a scripted set of peers instead of a live cluster.
- *
- * <p>Each case here is a way a failover can go wrong that a demo would show once and a
- * grader would ask about: stealing a job that its owner is still finishing, rebuilding a job
- * twice, or recomputing a slice whose answer already exists.
- */
+// Use scripted peers to verify takeover ownership, deduplication and reuse of completed results.
 class FailoverCoordinatorTest {
 
     private static final long TERM = 4L;
     private static final int SELF = 2;
 
-    /** Peers the takeover can see, what each answers with, and which are simply gone. */
+    // Peers the takeover can see, what each answers with, and which are simply gone.
     private static final class FakeSource implements CheckpointSource {
         private final List<WorkerEndpoint> live = new ArrayList<>();
         private final Map<Integer, FetchReply> answers = new LinkedHashMap<>();
@@ -47,7 +41,7 @@ class FailoverCoordinatorTest {
             return this;
         }
 
-        /** Registered but not answering: what a crashed worker looks like until it exits. */
+        // Registered but not answering: what a crashed worker looks like until it exits.
         FakeSource unreachable(int... ids) {
             alive(ids);
             for (int id : ids) {
@@ -108,7 +102,7 @@ class FailoverCoordinatorTest {
         return WorkerEndpoint.newBuilder().setWorkerId(id).setHost("localhost").setGrpcPort(5000 + id).build();
     }
 
-    /** A replica of a two-slice job accepted by {@code acceptedBy}. */
+    // A replica of a two-slice job accepted by acceptedBy.
     private static CheckpointLog replicaOf(int jobId, int acceptedBy) {
         CheckpointLog log = new CheckpointLog(5);
         log.apply(log.acceptedEntry(job(jobId), List.of(
@@ -122,8 +116,7 @@ class FailoverCoordinatorTest {
 
     @Test
     void aJobOwnedByAWorkerThatIsRegisteredButSilentIsStillTakenOver() {
-        // A crashed worker stays in the directory until it exits, so "listed" is not "alive".
-        // If the takeover trusted the directory it would never recover anything.
+        // A registered worker may be unreachable; recovery must probe its liveness.
         CheckpointLog replica = replicaOf(1, 1);
         FakeSource source = new FakeSource().alive(3, 4).unreachable(1).holds(3, replica);
 
@@ -133,8 +126,7 @@ class FailoverCoordinatorTest {
 
     @Test
     void aJobWhoseAcceptingCoordinatorIsStillAliveIsLeftAlone() {
-        // The trap this guards: a normal rotation leaves the previous coordinator alive and
-        // still finishing its job. Leadership moved; the job did not.
+        // Leadership rotation must not steal unfinished jobs from a live coordinator.
         CheckpointLog replica = replicaOf(1, 1);
         int rebuilt = coordinator(new FakeSource().alive(1, 3, 4).holds(3, replica)).takeOver();
 
@@ -154,8 +146,7 @@ class FailoverCoordinatorTest {
         assertEquals(1, job.jobId());
         RestoredJob.RestoredSlice first = job.slices().get(0);
         RestoredJob.RestoredSlice second = job.slices().get(1);
-        // The dead coordinator's own slice is taken over locally under a higher attempt,
-        // which also fences any answer it might still have been about to send.
+        // Increase the attempt when reassigning the failed coordinator slice to reject late results.
         assertEquals(SELF, first.owner().getWorkerId());
         assertEquals(2, first.attempt());
         // The live worker keeps its slice and its attempt: it still holds that work.
@@ -230,8 +221,7 @@ class FailoverCoordinatorTest {
 
     @Test
     void takeoverMergesEveryReplicaBeforeDeciding() {
-        // Two peers disagree: one has seen slice 2 finished, the other has not. The merge is
-        // what stops the decision being made on the stale view alone.
+        // Merge both replicas before recovery so completed slices from either peer are retained.
         CheckpointLog withResult = replicaOf(1, 1);
         withResult.apply(withResult.sliceEntry(1, 2, null, 0,
                 TaskResult.newBuilder().setJobId(1).setWorkerId(3).setTaskId(2).setAttempt(1)

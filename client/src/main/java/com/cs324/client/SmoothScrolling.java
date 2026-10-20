@@ -7,7 +7,7 @@ import java.awt.event.MouseEvent;
 import java.awt.event.MouseWheelEvent;
 import javax.swing.*;
 
-/** Short eased wheel movements, with precise trackpad deltas and nested scroll handoff. */
+// Short eased wheel movements, with precise trackpad deltas and nested scroll handoff.
 final class SmoothScrolling {
     private static final String KEY = SmoothScrolling.class.getName();
     private final JScrollPane pane;

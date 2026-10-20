@@ -7,14 +7,7 @@ import com.cs324.registry.proto.WorkerEndpoint;
 
 import java.util.List;
 
-/**
- * A replicated job handed back to the job service after a coordinator failure.
- *
- * <p>It is a plain record on purpose: the job service learns nothing about replication, it
- * simply receives a job in the state it should have been in. Slices that already have a
- * result come back with it, which is what keeps recovery from recomputing finished work -
- * and therefore from adding a PRIMESUM twice.
- */
+// Transfer recovered inputs and completed results to the job service without recomputing finished slices.
 public record RestoredJob(SubmitJobRequest request, List<RestoredSlice> slices, boolean delivered,
         TaskResult finalResult) {
 
@@ -33,10 +26,7 @@ public record RestoredJob(SubmitJobRequest request, List<RestoredSlice> slices, 
         return request.getJobId();
     }
 
-    /**
-     * One slice as it will run again: identity, input, owner, attempt, and any result that
-     * was already produced. An owner equal to the new coordinator means "compute it here".
-     */
+    // Retain slice identity, input, attempt, owner and any completed result during recovery.
     public record RestoredSlice(int taskId, TaskPayload payload, WorkerEndpoint owner, int attempt,
             TaskResult result) {
 

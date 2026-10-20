@@ -15,7 +15,7 @@ import java.util.concurrent.atomic.*;
 import org.junit.jupiter.api.*;
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Registry discovery, shared job callbacks and progress use real TCP gRPC calls. */
+// Registry discovery, shared job callbacks and progress use real TCP gRPC calls.
 class GrpcJobDistributionTest {
     private final ExecutorService pool = Executors.newFixedThreadPool(8);
     private final List<Server> servers = new ArrayList<>();

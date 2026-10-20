@@ -80,8 +80,7 @@ public class WorkerNode {
         catch (Exception ignored) { /* A crashed bootstrap cannot acknowledge deregistration. */ }
         directory.close();
     }
-    // Graceful-leave fast path: hand our neighbour set to every neighbour so survivors
-    // chain to a grandparent immediately; crashes skip this and rely on failure detection.
+    // Give neighbours this worker links so they can reconnect after a graceful exit.
     private static void notifyNeighboursOfLeaving(WorkerRuntime self, int workerId) {
         if (self == null) {
             return;
@@ -94,8 +93,7 @@ public class WorkerNode {
         }
     }
 
-    // Usage: WorkerNode [bootstrapHost] [bootstrapGrpcPort] [--grpc-port N].
-    // The flag overrides the positional/bootstrap default; all communication is gRPC.
+    // Usage: WorkerNode [bootstrapHost] [bootstrapGrpcPort] [--grpc-port N]; the flag overrides the port.
     static WorkerStartupConfig parseArgs(String[] args) {
         List<String> rest = new ArrayList<>(Arrays.asList(args));
         Integer flagPort = null;

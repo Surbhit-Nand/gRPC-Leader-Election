@@ -9,14 +9,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Properties;
 
-/**
- * Small durable store for the bootstrap's monotonically increasing ID counters.
- *
- * <p>Only the counters are persisted. Active worker membership remains in memory because a
- * restarted bootstrap cannot know which old workers are still alive; those workers must
- * re-register (and are then assigned a fresh identity). Persisting the counters prevents a
- * restarted bootstrap from handing a previously used worker or job ID to a different entity.
- */
+// Persist ID counters across bootstrap restarts; active worker membership remains in memory.
 public final class BootstrapStateStore {
 
     private static final String NEXT_WORKER_ID = "nextWorkerId";
@@ -45,9 +38,7 @@ public final class BootstrapStateStore {
             return new State(positiveLong(properties.getProperty(NEXT_WORKER_ID)),
                     positiveLong(properties.getProperty(NEXT_JOB_ID)));
         } catch (IOException | RuntimeException e) {
-            // A corrupt or unreadable state file must not stop the registry from starting. The
-            // counters restart at one, which is safe only while no old worker is still running;
-            // the README documents the required cluster-wide restart in that situation.
+            // Counter recovery failure requires a cluster-wide restart to avoid reusing IDs held by old workers.
             System.err.println("Cannot read bootstrap state " + file + ": " + e.getMessage()
                     + "; starting counters at 1");
             return State.initial();
@@ -73,8 +64,7 @@ public final class BootstrapStateStore {
                 Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING);
             }
         } catch (IOException e) {
-            // Losing a counter write is preferable to failing an otherwise healthy cluster. The
-            // in-memory counters remain monotonic; the next successful write repairs the file.
+            // Keep in-memory counters monotonic if persistence fails; a later write retries the saved state.
             System.err.println("Cannot persist bootstrap state " + file + ": " + e.getMessage());
             try {
                 Files.deleteIfExists(temp);

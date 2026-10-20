@@ -8,7 +8,7 @@ import java.util.List;
 import java.util.concurrent.*;
 import java.util.function.*;
 
-/** Re-discovers the job owner after interruption; never resubmits computation. */
+// Re-discovers the job owner after interruption; never resubmits computation.
 final class JobProgressSubscription implements AutoCloseable {
     private final int jobId;
     private final WorkerEndpoint initial;
@@ -42,8 +42,7 @@ final class JobProgressSubscription implements AutoCloseable {
             attempt = ManagedChannelBuilder.forAddress(endpoint.getHost(), endpoint.getGrpcPort()).usePlaintext().build();
             channel = attempt;
         }
-        // A deadline also detects a silently blackholed connection. Replaying retained
-        // progress is safe; no input is processed again by this subscription.
+        // Stream deadlines detect silent connections; reconnecting replays progress without resubmitting work.
         Context.ROOT.run(() -> JobProgressServiceGrpc.newStub(attempt).withDeadlineAfter(30, TimeUnit.SECONDS)
                 .watchJob(WatchJobRequest.newBuilder().setJobId(jobId).build(), new StreamObserver<>() {
                     private boolean finished;
@@ -72,8 +71,7 @@ final class JobProgressSubscription implements AutoCloseable {
             try { peers = discovery.get().stream().filter(p -> p.getGrpcPort() > 0)
                     .sorted(java.util.Comparator.comparingInt(WorkerEndpoint::getWorkerId)).toList(); }
             catch (RuntimeException unavailable) { peers = List.of(); }
-            // The owner of an in-flight job need not be the current elected leader:
-            // ordinary rotation leaves earlier jobs on their original coordinator.
+            // After leadership rotation, unfinished jobs stay with their original coordinator.
             connect(peers.isEmpty() ? initial : peers.get(Math.floorMod(nextPeer++, peers.size())));
         }, 500, TimeUnit.MILLISECONDS);
     }

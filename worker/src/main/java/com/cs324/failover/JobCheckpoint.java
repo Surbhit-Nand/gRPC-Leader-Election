@@ -12,24 +12,13 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * One job as a replica holds it: the original request, every slice with its input and
- * current owner, and the final result once the job ended.
- *
- * <p>The slice table is the whole point of the log. Holding the inputs means a survivor
- * rebuilds the exact same split, and holding the completed slices' results means recovery
- * never recomputes work that already finished - which is what keeps a failover from
- * double counting a PRIMESUM or PRIMECOUNT.
- *
- * <p>Not thread-safe on its own: {@link CheckpointLog} owns the locking, because the
- * sequence number that guards every mutation belongs to the log, not to a job.
- */
+// Retain job inputs, owners and results for recovery; CheckpointLog protects mutations with its lock.
 public final class JobCheckpoint {
 
-    /** One slice: stable identity, the input it computes, who owns it, and any result. */
+    // One slice: stable identity, the input it computes, who owns it, and any result.
     public record Slice(int taskId, TaskPayload input, WorkerEndpoint owner, int attempt, TaskResult result) {
 
-        /** True once this slice has produced its answer and must not be recomputed. */
+        // True once this slice has produced its answer and must not be recomputed.
         public boolean completed() {
             return result != null;
         }
@@ -40,9 +29,7 @@ public final class JobCheckpoint {
     private final Map<Integer, Slice> slices = new LinkedHashMap<>();
     private long sequence;
     private long term;
-    // The coordinator that accepted this job. Job ownership is not leadership: after an
-    // ordinary rotation the previous coordinator is alive and still finishing its jobs, and
-    // only its death makes the job another worker's problem.
+    // The accepting coordinator owns this job until it fails, even after leadership rotates.
     private int acceptedBy = -1;
     private TaskResult finalResult;
     private boolean delivered;
@@ -60,12 +47,12 @@ public final class JobCheckpoint {
         this.term = term;
     }
 
-    /** Worker id of the coordinator that accepted the job, or -1 when unknown. */
+    // Worker id of the coordinator that accepted the job, or -1 when unknown.
     public int acceptedBy() {
         return acceptedBy;
     }
 
-    /** Detached read view; called while the owning log holds its monitor. */
+    // Detached read view; called while the owning log holds its monitor.
     JobCheckpoint copy() {
         JobCheckpoint copy = new JobCheckpoint(request, acceptedAtMillis, sequence, term);
         copy.slices.putAll(slices);
@@ -91,7 +78,7 @@ public final class JobCheckpoint {
         return acceptedAtMillis;
     }
 
-    /** Highest per-job sequence folded in so far; the base for the next entry. */
+    // Highest per-job sequence folded in so far; the base for the next entry.
     public long sequence() {
         return sequence;
     }
@@ -100,7 +87,7 @@ public final class JobCheckpoint {
         return term;
     }
 
-    /** A finished job has a result and no further transitions are expected. */
+    // A finished job has a result and no further transitions are expected.
     public boolean finished() {
         return finalResult != null;
     }
@@ -109,7 +96,7 @@ public final class JobCheckpoint {
         return finalResult;
     }
 
-    /** Whether the client callback for the final result was acknowledged. */
+    // Whether the client callback for the final result was acknowledged.
     public boolean delivered() {
         return delivered;
     }
@@ -122,7 +109,7 @@ public final class JobCheckpoint {
         return slices.get(taskId);
     }
 
-    /** Slices with no result yet: the only work a takeover may have to arrange. */
+    // Slices with no result yet: the only work a takeover may have to arrange.
     public List<Slice> unfinished() {
         List<Slice> pending = new ArrayList<>();
         for (Slice slice : slices.values()) {
@@ -133,7 +120,7 @@ public final class JobCheckpoint {
         return pending;
     }
 
-    /** Installs the initial slice table. Only valid while the table is empty. */
+    // Installs the initial slice table. Only valid while the table is empty.
     void adoptInitialSlices(List<SliceState> states) {
         if (!slices.isEmpty()) {
             throw new IllegalStateException("Job " + jobId() + " already has slices to replace");
@@ -144,21 +131,17 @@ public final class JobCheckpoint {
         }
     }
 
-    /** Replaces the whole table, used only by a FetchCheckpoints snapshot. */
+    // Replaces the whole table, used only by a FetchCheckpoints snapshot.
     void replaceSlices(List<SliceState> states) {
         slices.clear();
         adoptInitialSlices(states);
     }
 
-    /**
-     * Applies one delta. Absent fields mean unchanged, so an update can carry an owner
-     * change, an attempt change, a result, or any combination.
-     */
+    // Apply only fields present in the delta; missing values leave state unchanged.
     void applySliceDelta(SliceUpdated update) {
         Slice current = slices.get(update.getTaskId());
         if (current == null) {
-            // An update for a slice this replica never saw accepted: keep the log's shape
-            // rather than inventing an input we do not have.
+            // An update for a slice this replica never saw accepted: keep the log's shape rather than inventing an input we do not have.
             return;
         }
         WorkerEndpoint owner = update.getOwner().getWorkerId() > 0 ? update.getOwner() : current.owner();
@@ -181,7 +164,7 @@ public final class JobCheckpoint {
         this.term = newTerm;
     }
 
-    /** Current state as a snapshot slice list, for serving a peer that asks for it. */
+    // Current state as a snapshot slice list, for serving a peer that asks for it.
     public List<SliceState> snapshotSlices() {
         List<SliceState> states = new ArrayList<>(slices.size());
         for (Slice slice : slices.values()) {

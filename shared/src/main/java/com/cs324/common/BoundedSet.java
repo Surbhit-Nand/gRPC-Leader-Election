@@ -2,14 +2,7 @@ package com.cs324.common;
 
 import java.util.LinkedHashSet;
 
-/**
- * A thread-safe insertion-ordered set with a fixed maximum size.
- *
- * <p>Election deduplication only needs to remember recent message identifiers.
- * Keeping every identifier until the worker exits would turn a long-lived
- * process into an unbounded log of old waves, so the oldest identifiers are
- * discarded once the retention window is full.
- */
+// Thread-safe bounded set that discards the oldest election message IDs.
 public final class BoundedSet<E> {
 
     private final int maxSize;

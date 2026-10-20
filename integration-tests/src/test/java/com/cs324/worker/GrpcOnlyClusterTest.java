@@ -8,7 +8,7 @@ import java.nio.file.Files;
 import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Launch the actual worker entry point against a gRPC-only bootstrap. */
+// Launch the actual worker entry point against a gRPC-only bootstrap.
 class GrpcOnlyClusterTest {
     @Test void processesJoinComputeAndRecoverUsingOnlyGrpc() throws Exception {
         var directory = new BootstrapRegistryImpl();

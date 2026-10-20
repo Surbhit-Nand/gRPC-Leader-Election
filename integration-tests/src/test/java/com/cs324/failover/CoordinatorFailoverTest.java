@@ -44,32 +44,14 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * Coordinator failure over real TCP: four workers, a real directory, a real client callback.
- *
- * <p>The job is made long on purpose - each worker's share takes several seconds - so the
- * coordinator is guaranteed to be killed with work genuinely in flight, rather than relying on
- * winning a race. Killing it is a crash, not a clean exit: the gRPC server is dropped, but the directory still lists the worker, exactly as it would for a process that died without deregistering.
- *
- * <p>The assertions are the ones the assignment asks for: a replacement coordinator is elected
- * within a bound, the job finishes with the same answer it would have had, the client is
- * called back exactly once, and the recovered job's progress stream reaches 100%.
- */
+// Crash a coordinator during an in-flight job and verify election, recovery, result and progress over gRPC.
 class CoordinatorFailoverTest {
 
-    /**
-     * A substantial range, with an explicit in-flight assertion before each crash.
-     * Correctness does not depend on an assumed number of seconds per CPU.
-     */
+    // Assert the job is still running before each crash instead of assuming a fixed computation time.
     private static final int RANGE_END = 10_000_000;
-    /**
-     * Sum of the primes up to {@link #RANGE_END}, computed independently with the plain
-     * calculator ({@code WorkerTaskCalculator.calculate("PRIMESUM", new PrimeRange(1, 10_000_000))}).
-     * Comparing against an oracle rather than against another run of the same system is what
-     * makes a dropped or double-counted slice fail the test.
-     */
+    // Expected prime sum computed independently with WorkerTaskCalculator for RANGE_END.
     private static final long ORACLE_SUM = 3_203_324_994_356L;
-    /** Small, independently known answer used to pin the arithmetic in this same cluster. */
+    // Small, independently known answer used to pin the arithmetic in this same cluster.
     private static final long KNOWN_SMALL_SUM = 76_127L;
     private static final long FAILOVER_BOUND_MS = 90_000;
 
@@ -104,10 +86,7 @@ channels.clear();
 Server callbacks = ServerBuilder.forPort(0).addService(new ClientResultService((jobId, value) -> {
             deliveriesByJob.computeIfAbsent(jobId, key -> new AtomicInteger()).incrementAndGet();
             if (value instanceof Number) {
-                // One answer per job is what the client acts on. A crashed worker cannot send
-                // anything in a real process death, but an in-JVM shutdown is graceful enough
-                // that the dying coordinator can still fail its own job and say so; the GUI
-                // receiver would show that and nothing else, so this mirrors it.
+                // Keep the first client result per job, matching the GUI callback behavior.
                 answers.computeIfAbsent(jobId, key -> new CompletableFuture<>()).complete(value);
             } else {
                 rejectedAnswers.computeIfAbsent(jobId, key -> new CopyOnWriteArrayList<>()).add(value);
@@ -121,7 +100,7 @@ Server callbacks = ServerBuilder.forPort(0).addService(new ClientResultService((
         }
     }
 
-    /** One worker with its own gRPC listener, published through the directory as in production. */
+    // One worker with its own gRPC listener, published through the directory as in production.
     private WorkerRuntime addWorker(int id) throws Exception {
         WorkerRuntime worker = new WorkerRuntime(id);
         workers.put(id, worker);
@@ -139,7 +118,7 @@ Server callbacks = ServerBuilder.forPort(0).addService(new ClientResultService((
         return RegistryServiceGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS);
     }
 
-    /** A ring: everyone is two hops from everyone, so no topology decides the outcome. */
+    // A ring: everyone is two hops from everyone, so no topology decides the outcome.
     private void wireRing() throws Exception {
         int[] ids = workers.keySet().stream().mapToInt(Integer::intValue).toArray();
         for (int i = 0; i < ids.length; i++) {
@@ -170,13 +149,7 @@ Server callbacks = ServerBuilder.forPort(0).addService(new ClientResultService((
         return jobId;
     }
 
-    /**
-     * Submits to whoever the cluster currently believes leads, retrying while it settles.
-     *
-     * <p>A refusal is the designed answer to "leadership moved": the job id is released and the
-     * client is expected to retry. After a failover the cluster can still be converging, so a
-     * test that hard-codes a worker id would be asserting that leadership never moves again.
-     */
+    // Retry submission to the discovered coordinator while leadership settles.
     private int submitToCurrentCoordinator(Set<Integer> voters, String jobType, Object payload) throws Exception {
         long deadline = System.currentTimeMillis() + FAILOVER_BOUND_MS;
         RuntimeException last = null;
@@ -205,23 +178,14 @@ private Object awaitResult(int jobId) throws Exception {
         return answers.get(jobId).get(FAILOVER_BOUND_MS, TimeUnit.MILLISECONDS);
     }
 
-    /**
-     * How many *answers* the client acted on for one job: error strings from a dying coordinator
-     * are counted separately, because a real process death cannot send them at all.
-     */
+    // Count successful results separately from errors generated during an in-JVM shutdown.
     private int answersDelivered(int jobId) {
         return rejectedAnswers.containsKey(jobId)
                 ? (deliveries(jobId) - rejectedAnswers.get(jobId).size())
                 : deliveries(jobId);
     }
 
-    /**
-     * Waits until the given workers agree on one coordinator that is not the rejected one.
-     *
-     * <p>Agreement alone is not enough right after a crash: every survivor still names the dead
-     * worker for as long as it takes to notice, and returning that view would let the test pass
-     * without a failover having happened at all.
-     */
+    // Wait for surviving workers to agree on a coordinator other than the failed one.
     private int awaitCoordinator(Set<Integer> voters, int rejected, long boundMillis) throws Exception {
         long deadline = System.currentTimeMillis() + boundMillis;
         while (System.currentTimeMillis() < deadline) {
@@ -250,7 +214,7 @@ private Object awaitResult(int jobId) throws Exception {
                 + " within " + boundMillis + "ms; last views: " + views + "\n  recent events:" + events);
     }
 
-/** What every worker currently believes, for failure messages. */
+// What every worker currently believes, for failure messages.
     private String clusterState() {
         StringBuilder state = new StringBuilder();
         for (var entry : workers.entrySet()) {
@@ -270,14 +234,7 @@ private Object awaitResult(int jobId) throws Exception {
         return state.toString();
     }
 
-    /**
-     * Waits until the coordinator has actually dispatched every slice of a job.
-     *
-     * <p>A submission returns as soon as the work is queued, so killing a coordinator the
- * <em>instant</em> after the ack tests a worker that had not started working yet. Waiting for
- * the dispatch records makes "killed mid-job" mean what it says: every slice is out, and the
- * calculations are genuinely running when the process goes.
- */
+    // Wait for every slice to be dispatched before crashing the coordinator.
     private void awaitDispatched(int coordinatorId, int jobId, int expectedSlices) throws Exception {
         long deadline = System.currentTimeMillis() + 30_000;
         while (System.currentTimeMillis() < deadline) {
@@ -294,7 +251,7 @@ private Object awaitResult(int jobId) throws Exception {
                 + " within 30s; feed: " + workers.get(coordinatorId).getRecentEvents(0));
     }
 
-    /** Kills a worker the way a crashed process looks: no farewell, no deregistration. */
+    // Kills a worker the way a crashed process looks: no farewell, no deregistration.
     private void crash(int id) throws Exception {
         WorkerRuntime worker = workers.get(id);
         worker.shutdown();
@@ -302,7 +259,7 @@ private Object awaitResult(int jobId) throws Exception {
         // The directory still lists the worker: nothing deregistered it, which is the point.
     }
 
-    /** Reads the whole progress stream and returns the last snapshot. */
+    // Reads the whole progress stream and returns the last snapshot.
     private JobProgress readProgress(int workerId, int jobId) {
         JobProgressServiceGrpc.JobProgressServiceBlockingStub stub = JobProgressServiceGrpc
                 .newBlockingStub(channelTo(workers.get(workerId))).withDeadlineAfter(10, TimeUnit.SECONDS);
@@ -314,7 +271,7 @@ private Object awaitResult(int jobId) throws Exception {
         return last;
     }
 
-    /** How many times the client was called back for one job. */
+    // How many times the client was called back for one job.
     private int deliveries(int jobId) {
         AtomicInteger count = deliveriesByJob.get(jobId);
         return count == null ? 0 : count.get();
@@ -375,13 +332,10 @@ Object recovered = awaitResult(jobId);
         assertNotNull(recovered, "the client must still receive an answer");
         assertTrue(recovered instanceof Long, "the client must receive a sum, not an error: " + recovered
                 + " | crashed=" + first + " replacement=" + second + " | " + clusterState());
-        // Compared against an independently computed oracle: a slice that was dropped, counted
-        // twice, or recomputed from a stale input all produce a different sum.
+        // Use an independent expected sum to detect missing, duplicated or stale slice results.
         assertEquals(ORACLE_SUM, ((Number) recovered).longValue(),
                 "the recovered job must produce the exact answer for its input");
-        // Exactly one answer reaches the client for the failed job. Error strings are counted
-        // separately: a crashed *process* cannot send anything, but an in-JVM shutdown is graceful
-        // enough that the dying coordinator can still fail its own job and say so.
+        // Count successful callbacks separately from errors emitted during an in-JVM shutdown.
         assertEquals(1, answersDelivered(jobId),
                 "the client must be called back exactly once for the failed job");
         assertTrue(rejectedAnswers.getOrDefault(jobId, List.of()).size() <= 1,
@@ -455,8 +409,7 @@ int jobId = submitToCurrentCoordinator(all, "MAX", new int[] {3, 9, 4, 9, -2});
         assertEquals(9, ((Number) awaitResult(jobId)).intValue());
         assertEquals(1, answersDelivered(jobId));
 
-        // The finished job is still in every replica as a tombstone. A new election triggers a
-        // takeover that merges those replicas, and must skip it rather than run the work again.
+        // Keep finished-job markers through the next election to prevent recomputing completed work.
         workers.get(2).startElection();
         int second = awaitCoordinator(all, -1, 30_000);
         assertNotEquals(-1, second);

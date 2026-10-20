@@ -17,9 +17,7 @@ public interface ClusterDirectory {
     // Lets a coordinator reach every worker, not only its own neighbours.
     List<Integer> getActiveWorkerIds();
 
-    // Automatic registration: bootstrap allocates a monotonic id, records the
-    // worker address, and returns the id plus one live peer to join (null if first).
-    // Single call so allocation and directory insert are atomic (no burned ids on crash).
+    // Allocate an ID and register its address atomically, returning one peer to join.
     WorkerRegistration registerWorkerAuto(String host, int port);
 
     // All ids ever handed out that are still registered (debug/observability).

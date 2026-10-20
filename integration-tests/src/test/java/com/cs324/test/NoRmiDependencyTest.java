@@ -20,7 +20,7 @@ import java.util.stream.Stream;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Guards the gRPC-only boundary: no RMI imports, supertypes, serialization, or port constant. */
+// Guards the gRPC-only boundary: no RMI imports, supertypes, serialization, or port constant.
 @SuppressWarnings("deprecation")
 class NoRmiDependencyTest {
 

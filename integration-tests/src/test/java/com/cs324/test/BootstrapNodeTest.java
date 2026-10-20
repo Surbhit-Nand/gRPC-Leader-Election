@@ -12,16 +12,10 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-// BootstrapNode.main() calls System.exit() on failure, which would kill the test JVM itself.
-// Each test therefore launches it as a real child process, the way it is actually run.
-// Its exit code and console output are then read from the outside, not in-process.
+// Launch bootstrap in a child JVM so its System.exit calls cannot terminate the test runner.
 class BootstrapNodeTest {
 
-    // The child's classpath, not just target/classes: BootstrapNode touches gRPC
-    // types in its own bytecode now, so the JVM verifier needs the dependency
-    // jars at launch or it dies with NoClassDefFoundError before main runs.
-    // Surefire's own classpath already carries them (compile-scoped deps), so
-    // hand the whole thing down instead of reconstructing it.
+    // Pass the full test classpath so the child JVM can load gRPC dependencies.
     private static final String CLASSPATH = System.getProperty("java.class.path");
     // A port nothing else in the suite binds, so the child cannot collide with another test.
     private static final int TEST_PORT = 18799;

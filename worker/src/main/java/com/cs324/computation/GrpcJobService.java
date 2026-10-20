@@ -15,7 +15,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.*;
 
-/** Shared SubmitJob/AssignTask/ReportTaskResult API, independent of election transport. */
+// Shared SubmitJob/AssignTask/ReportTaskResult API, independent of election transport.
 public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase implements AutoCloseable {
     private static final long PROBE_INTERVAL_MILLIS = 500;
     private static final long PROBE_TIMEOUT_MILLIS = 1_000;
@@ -36,7 +36,7 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
     private record Submission(SubmitJobRequest request, CompletableFuture<Void> ready) {}
     private final BoundedMap<Integer, Submission> submissions = new BoundedMap<>(Constants.JOB_SUBMISSION_RETENTION);
     private record TaskKey(int job, int task, int attempt) {}
-    /** Mutable on purpose: a new coordinator may take over where an attempt must report. */
+    // Mutable on purpose: a new coordinator may take over where an attempt must report.
     private static final class Work {
         volatile TaskAssignment request;
         final CompletableFuture<TaskResult> result = new CompletableFuture<>();
@@ -45,8 +45,7 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
         CompletableFuture<TaskResult> result() { return result; }
     }
     private final BoundedMap<TaskKey, Work> tasks = new BoundedMap<>(Constants.JOB_TASK_RETENTION);
-    // Replication is optional and additive: without a sink the job service behaves exactly
-    // as before, and a failing sink can never fail a job.
+    // Acceptance must replicate successfully before work starts; later checkpoint updates are best effort.
     private volatile com.cs324.failover.CheckpointSink checkpoints = com.cs324.failover.CheckpointSink.noop();
     private volatile IntConsumer admissionRollback = jobId -> {};
     private volatile boolean closed;
@@ -55,12 +54,12 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
         admissionRollback = Objects.requireNonNull(rollback);
     }
 
-    /** Lets Member 2 replicate coordinator state; additive and independent of job behaviour. */
+    // Install the replication sink used for acceptance and subsequent job updates.
     public void setCheckpointSink(com.cs324.failover.CheckpointSink sink) {
         this.checkpoints = sink == null ? com.cs324.failover.CheckpointSink.noop() : sink;
     }
 
-    /** Observed through a wrapper so a replication fault cannot escape into the job path. */
+    // Later checkpoint failures are logged without interrupting an accepted job.
     private void checkpoint(java.util.function.Consumer<com.cs324.failover.CheckpointSink> action) {
         try { action.accept(checkpoints); }
         catch (RuntimeException e) { System.err.println("Checkpoint update failed: " + e.getMessage()); }
@@ -147,9 +146,7 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
             Work work = new Work(request);
             Work previous = tasks.putIfAbsent(key, work);
             if (previous != null && !previous.request().equals(request)) {
-                // Same (job, task, attempt) from a different coordinator: the work is already
-                // done or in flight, so recomputing would waste it and answering the old
-                // coordinator would lose the result. Move the report target instead.
+                // Reuse existing work after takeover, but send its result to the new coordinator.
                 if (sameAttemptNewCoordinator(previous.request(), request)) {
                     previous.request = request;
                     if (previous.result().isDone()) report(request, previous.result().join());
@@ -176,7 +173,7 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
         } catch (Exception e) { response.onError(status(e)); }
     }
 
-    /** Identical work with only the reporting coordinator replaced, which a failover does. */
+    // Identical work with only the reporting coordinator replaced, which a failover does.
     private static boolean sameAttemptNewCoordinator(TaskAssignment held, TaskAssignment incoming) {
         return held.getJobId() == incoming.getJobId() && held.getTaskId() == incoming.getTaskId()
                 && held.getAttempt() == incoming.getAttempt() && held.getJobType().equals(incoming.getJobType())
@@ -234,7 +231,7 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
             WorkerEndpoint local = WorkerEndpoint.newBuilder().setWorkerId(id).build();
             for (int i=0; i<chunks.size(); i++) slices.add(new Slice(i+1, chunks.get(i), i==0?local:peers.get(i-1)));
         }
-        /** Rebuilds a job a dead coordinator owned; every field comes from the replicated log. */
+        // Rebuilds a job a dead coordinator owned; every field comes from the replicated log.
         Run(com.cs324.failover.RestoredJob restored) {
             this.request = restored.request();
             for (com.cs324.failover.RestoredJob.RestoredSlice slice : restored.slices()) {
@@ -242,8 +239,7 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
                         ComputationCodec.decode(request.getJobType(), slice.payload()), slice.owner());
                 copy.attempt = Math.max(slice.attempt(), 1);
                 if (slice.result() != null) {
-                    // Already answered before the failure: keep the answer so the job neither
-                    // recomputes it nor counts it twice.
+                    // Already answered before the failure: keep the answer so the job neither recomputes it nor counts it twice.
                     Object value = ComputationCodec.result(slice.result());
                     if (value instanceof Number number) copy.result = number;
                 }
@@ -254,8 +250,7 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
             event(kind, detail + " [" + ComputationCodec.type(request.getJobType()) + "]");
         }
         void begin() {
-            // Acceptance is a required operation, not a best-effort telemetry update.
-            // No work, progress or callbacks may start before a replica confirms it.
+            // Confirm replicated acceptance before starting tasks, progress updates or client callbacks.
             checkpoints.onAccepted(request, checkpointSlices(), acceptedAtMillis);
             log("JOB_SUBMITTED", "Job " + request.getJobId() + " submitted via gRPC to coordinator Worker " + id);
             publishProgress();
@@ -267,7 +262,7 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
             if (deadline != null) deadline.cancel(false);
             if (probes != null) probes.cancel(false);
         }
-        /** The accepted split as replication needs it: identity, input, owner and attempt. */
+        // The accepted split as replication needs it: identity, input, owner and attempt.
         private List<com.cs324.failover.CheckpointSink.SliceSnapshot> checkpointSlices() {
             List<com.cs324.failover.CheckpointSink.SliceSnapshot> snapshot =
                     new ArrayList<>(slices.size());
@@ -276,12 +271,12 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
                         ComputationCodec.encode(slice.input), slice.owner, slice.attempt));
             return snapshot;
         }
-        /** Publishes one slice transition so a survivor knows where the work went. */
+        // Publishes one slice transition so a survivor knows where the work went.
         private void checkpointSlice(Slice slice, TaskResult result) {
             checkpoint(sink -> sink.onSliceUpdated(request.getJobId(), slice.taskId,
                     slice.owner, slice.attempt, result));
         }
-        /** Restarts a recovered job: the original deadline is not extended, only its floor. */
+        // Restarts a recovered job: the original deadline is not extended, only its floor.
         void beginRestored(long remainingMillis) {
             long pending = slices.stream().filter(slice -> slice.result==null).count();
             log(WorkerEvent.JOB_RECOVERED, "Job " + request.getJobId() + " restored on coordinator Worker "
@@ -323,8 +318,7 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
         private void sendAssignment(Slice slice) {
             int attempt=slice.attempt;
             slice.probing=true;
-            // Rebuild when the attempt or the reporting coordinator changed: after a failover
-            // the same attempt must carry the new endpoint or results go to the dead leader.
+            // Refresh the assignment when its attempt or result-reporting endpoint changes.
             if (slice.wireTask==null || slice.wireTask.getAttempt()!=attempt
                     || !slice.wireTask.getCoordinator().equals(self.get())) slice.wireTask=TaskAssignment.newBuilder()
                     .setJobId(request.getJobId()).setTaskId(slice.taskId).setAttempt(attempt)
@@ -426,8 +420,7 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
             if (deadline!=null) deadline.cancel(false);
             if (probes!=null) probes.cancel(false);
             jobs.remove(request.getJobId(), this);
-            // Tombstone first, then the delivery outcome: a survivor that reads the log between
-            // those two steps sees a finished job whose delivery is still unknown, and replays it.
+            // Record completion before callback delivery so takeover can replay an unconfirmed result.
             checkpoint(sink -> sink.onFinished(request.getJobId(), result));
             ClientEndpoint client=request.getClient();
             int jobId=request.getJobId();
@@ -450,25 +443,14 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
         }
     }
 
-    /**
-     * Resumes a job whose coordinator died, from state read back out of the replicated log.
-     *
-     * <p>Additive and outside the admission predicate on purpose: a recovered job was already
-     * accepted and billed to the client, so re-checking the five-job budget here would either
-     * refuse work that is already owed to a client or charge the new term twice. It also
-     * registers the original request in {@code submissions}, so a client that resubmits the
-     * same job id is acknowledged instead of running the work again.
-     *
-     * @return false when this job id is already being coordinated here.
-     */
+    // Resume a replicated job without consuming a new term slot; return false if already owned here.
     public boolean restore(com.cs324.failover.RestoredJob restored, long remainingMillis) {
         try {
             SubmitJobRequest request = restored.request();
             if (request.getJobId() < 1) throw new IllegalArgumentException("Positive job ID required");
             endpoint(request.getClient().getHost(), request.getClient().getPort());
             if (jobs.containsKey(request.getJobId())) return false;
-            // Identity claim first: a concurrent duplicate submission then attaches to this
-            // job instead of starting a second run of the same work.
+            // Identity claim first: a concurrent duplicate submission then attaches to this job instead of starting a second run of the same work.
             Submission claim = new Submission(request, CompletableFuture.completedFuture(null));
             if (submissions.putIfAbsent(request.getJobId(), claim) != null) return false;
             Run run;
@@ -491,14 +473,13 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
         }
     }
 
-    /** Sends one already-computed result to its client, used when replaying a tombstone. */
+    // Sends one already-computed result to its client, used when replaying a tombstone.
     public boolean deliverResult(SubmitJobRequest request, TaskResult result) {
         try {
             ClientEndpoint client = request.getClient();
             endpoint(client.getHost(), client.getPort());
             ManagedChannel channel = GrpcChannels.get(client.getHost(), client.getPort());
-            // Takeover runs on the worker pool. Only a received acknowledgement proves
-            // delivery; scheduling an asynchronous RPC does not.
+            // Takeover runs on the worker pool. Only a received acknowledgement proves delivery; scheduling an asynchronous RPC does not.
             ClientServiceGrpc.newBlockingStub(channel).withDeadlineAfter(10, TimeUnit.SECONDS)
                     .deliverResult(result);
             return true;
@@ -508,7 +489,7 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
         }
     }
 
-    /** Job ids this coordinator currently owns, so a failover can tell taken from untouched. */
+    // Job ids this coordinator currently owns, so a failover can tell taken from untouched.
     public Set<Integer> coordinatedJobIds() {
         return Set.copyOf(jobs.keySet());
     }
@@ -523,8 +504,7 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
         if (closed) return;
         ManagedChannel channel = GrpcChannels.get(host, port);
         try {
-            // Acknowledging ReportTaskResult ends its inbound RPC context. The
-            // independent client callback must survive that acknowledgement.
+            // Acknowledging ReportTaskResult ends its inbound RPC context. The independent client callback must survive that acknowledgement.
             Context.ROOT.run(() -> call.accept(channel, new StreamObserver<>() {
                 public void onNext(T value) { }
                 public void onError(Throwable error) { failure.accept(error); }

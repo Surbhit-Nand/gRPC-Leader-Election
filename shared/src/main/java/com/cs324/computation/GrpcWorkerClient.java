@@ -9,7 +9,7 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
-/** Local adapter for historical Java interfaces; every wire call uses protobuf/gRPC. */
+// Local adapter for historical Java interfaces; every wire call uses protobuf/gRPC.
 public final class GrpcWorkerClient implements WorkerControl {
     private final WorkerEndpoint endpoint;
     public GrpcWorkerClient(WorkerEndpoint endpoint) { this.endpoint = endpoint; }

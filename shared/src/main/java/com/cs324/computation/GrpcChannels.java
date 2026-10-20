@@ -5,15 +5,7 @@ import io.grpc.ManagedChannelBuilder;
 
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * Shared cache of plaintext gRPC channels keyed by {@code host:port}.
- *
- * <p>Control probes, assignments, result reports and monitoring all talk to the
- * same small set of peers. Creating and shutting down a channel for every RPC
- * works for a demo but pays a TCP/TLS/HTTP2 setup cost on every probe and can
- * exhaust transient ports under load. A channel is safe for concurrent RPCs and
- * reconnects internally, so one channel per peer is sufficient.
- */
+// Reuse one plaintext gRPC channel per host and port across concurrent calls.
 public final class GrpcChannels {
 
     private static final ConcurrentHashMap<String, ManagedChannel> CHANNELS = new ConcurrentHashMap<>();
@@ -36,7 +28,7 @@ public final class GrpcChannels {
                 .build());
     }
 
-    /** Number of cached channels; used by tests and diagnostics. */
+    // Number of cached channels; used by tests and diagnostics.
     public static int size() {
         return CHANNELS.size();
     }

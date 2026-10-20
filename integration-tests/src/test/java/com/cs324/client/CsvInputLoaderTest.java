@@ -11,8 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
-// Merging contract: several files become one payload, and the rules judge the whole
-// payload rather than each fragment, so a bad value is always reported against its file.
+// Validate the merged payload and identify the source file for invalid values.
 class CsvInputLoaderTest {
 
     // Writes a file the loader can read, keeping each test's setup to one line.

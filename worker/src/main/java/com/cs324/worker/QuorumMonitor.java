@@ -11,15 +11,7 @@ import java.util.function.Consumer;
 import java.util.function.IntPredicate;
 import java.util.function.Supplier;
 
-/**
- * Keeps a majority-quorum lease alive for the current leader.
- *
- * <p>Every tick counts the leader itself plus the ready peers it can reach in
- * bounded time. A strict majority is required, so two isolated groups of a
- * four-worker cluster can never both serve client jobs. A leader that misses
- * {@code lossThreshold} consecutive checks is told to step down; a recovered
- * majority only restores the lease, never leadership.
- */
+// Renew the leader lease from majority reachability; repeated quorum loss forces it to step down.
 final class QuorumMonitor implements AutoCloseable {
 
     private final int selfId;
@@ -59,7 +51,7 @@ final class QuorumMonitor implements AutoCloseable {
         timer.scheduleWithFixedDelay(this::tick, intervalMillis, intervalMillis, TimeUnit.MILLISECONDS);
     }
 
-    /** One check, package-visible so tests can step the monitor without waiting. */
+    // One check, package-visible so tests can step the monitor without waiting.
     void tick() {
         if (closed) {
             return;
@@ -81,8 +73,7 @@ final class QuorumMonitor implements AutoCloseable {
                 }
             }
         } catch (RuntimeException directoryUnavailable) {
-            // A directory that cannot be read is treated like a lost quorum: serving
-            // without knowing the membership could let two leaders run at once.
+            // Treat unavailable membership as lost quorum to prevent serving with an unverified majority.
             log.accept("quorum check could not read membership: " + directoryUnavailable.getMessage());
             reachableCount = 1;
             quorumSize = 2;

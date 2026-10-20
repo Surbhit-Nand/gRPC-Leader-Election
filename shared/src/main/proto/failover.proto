@@ -1,22 +1,4 @@
-// Coordinator-failure contract (Member 2). A new file, so no field number or
-// RPC in registry/election/job/progress is touched.
-//
-// Why these three RPCs and no others:
-//
-// - Heartbeat: failure detection has to ask a question the RPC answer alone
-//   cannot settle. A timed-out probe is indistinguishable from a slow peer, so
-//   the reply carries the responder's (term, coordinator_id, is_coordinator).
-//   That is what separates "this coordinator is busy" from "this coordinator has
-//   been deposed and I am talking to a zombie", and it doubles as re-discovery:
-//   a follower that hears a higher term asks peers instead of starting a wave.
-// - Replicate: a coordinator that accepts a job and dies takes the job with it.
-//   Accepted state is therefore written to the peers before the client is
-//   acknowledged, and slice/finish transitions follow as they happen.
-// - FetchCheckpoints: takeover is a read. Merging is per job sequence, so a
-//   survivor can ask every reachable peer and keep the newest view of each job.
-//
-// Payloads stay inspectable: no opaque bytes blobs, every field is readable in a
-// log line or a test assertion.
+// Heartbeat, replication and recovery RPCs served by every worker.
 syntax = "proto3";
 package distrilab;
 option java_package = "com.cs324.failover.proto";
@@ -25,8 +7,7 @@ option java_multiple_files = true;
 import "job.proto";
 import "registry.proto";
 
-// Coordinator liveness and re-discovery. Held by every worker; the follower
-// sends it to the coordinator it currently believes in.
+// Coordinator liveness and re-discovery. Held by every worker; the follower sends it to the coordinator it currently believes in.
 service FailoverService {
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatReply);
   rpc Replicate(ReplicateRequest) returns (ReplicateAck);
@@ -42,18 +23,13 @@ message HeartbeatRequest {
 }
 
 message HeartbeatReply {
-  // Responder's leadership generation and who it believes leads. A follower that
-  // sees a higher term re-discovers instead of electing.
+  // Responder's leadership generation and who it believes leads. A follower that sees a higher term re-discovers instead of electing.
   int64 term = 1;
   int32 coordinator_id = 2;
   bool is_coordinator = 3;
 }
 
-// One slice as the coordinator accepted it. The payload travels so a survivor can
-// rebuild the split without re-deriving it, which is what keeps a reassigned
-// slice worth exactly the same as the original. Accepted slices are never
-// started yet: the delta below carries every later transition, and result
-// appears only in a snapshot taken by FetchCheckpoints.
+// Preserve each slice input and result so recovery can rebuild the original split.
 message SliceState {
   int32 task_id = 1;
   TaskPayload input = 2;
@@ -62,19 +38,15 @@ message SliceState {
   TaskResult result = 5;
 }
 
-// A job the coordinator accepted. Carries the original SubmitJobRequest so a
-// survivor can acknowledge a client resubmission instead of running it twice.
+// Keep the original request so recovery can recognize duplicate submissions.
 message JobAccepted {
   SubmitJobRequest request = 1;
   repeated SliceState slices = 2;
-  // Coordinator wall clock at acceptance, so the restored job keeps the deadline
-  // it would have had rather than silently gaining a fresh full one.
+  // Preserve the acceptance time so recovery can calculate the remaining deadline.
   int64 accepted_at_millis = 3;
 }
 
-// A delta on one slice. Absent fields mean "unchanged", so a small update stays
-// small: worker_id 0 = no owner change, attempt 0 = no attempt change, unset
-// result = still running.
+// A missing owner or result, or a zero attempt, leaves that slice field unchanged.
 message SliceUpdated {
   int32 task_id = 1;
   WorkerEndpoint owner = 2;
@@ -82,21 +54,18 @@ message SliceUpdated {
   TaskResult result = 4;
 }
 
-// Tombstone. A job that reached a result must not be rebuilt, and its client
-// callback may still need replaying, so the final result travels with it.
+// A terminal marker prevents recomputation and retains the result for callback retries.
 message JobFinished {
   TaskResult result = 1;
   // True once the client callback for that result was acknowledged.
   bool delivered = 2;
 }
 
-// One append-only log entry. Per-job sequence numbers make folding idempotent:
-// a duplicate or an out-of-order arrival is ignored rather than applied twice.
+// Per-job sequence numbers reject duplicate and out-of-order checkpoint entries.
 message CheckpointEntry {
   int32 job_id = 1;
   int64 sequence = 2;
-  // Leadership generation that produced the entry, for diagnostics and for
-  // rejecting a write from a coordinator that has already been deposed.
+  // Reject checkpoint writes from a coordinator in an older term.
   int64 term = 3;
   int32 coordinator_id = 4;
   oneof entry {
@@ -113,8 +82,7 @@ message ReplicateRequest {
 }
 
 message ReplicateAck {
-  // Highest per-job sequence this replica holds, so the sender can resend only
-  // what is genuinely missing instead of replaying its whole log.
+  // Highest sequence stored by the peer; acceptance requires confirmation of the submitted sequence.
   int64 acknowledged_sequence = 1;
 }
 

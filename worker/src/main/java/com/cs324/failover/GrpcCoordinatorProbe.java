@@ -18,14 +18,7 @@ import java.util.function.Consumer;
 import java.util.function.IntSupplier;
 import java.util.function.LongSupplier;
 
-/**
- * Sends {@code FailoverService.Heartbeat} to one coordinator over gRPC.
- *
- * <p>A probe that cannot even be sent counts as a miss, not as an absence of information: a
- * coordinator this worker cannot resolve or connect to is exactly the failure the monitor
- * exists to notice. Silently ignoring that case is what let a dead coordinator stay
- * unnoticed before.
- */
+// Probe coordinator health over gRPC; failed discovery or connection counts as a missed probe.
 public final class GrpcCoordinatorProbe implements CoordinatorHealthMonitor.Probe {
 
     private record Peer(String host, int port, ManagedChannel channel) {}
@@ -70,8 +63,7 @@ public final class GrpcCoordinatorProbe implements CoordinatorHealthMonitor.Prob
                     + e.getMessage());
             return null;
         } catch (RuntimeException e) {
-            // Includes "cannot resolve this worker": indistinguishable from unreachable, and
-            // both mean the coordinator cannot be counted on right now.
+            // Failed discovery and failed connections both count as missed probes.
             log.accept("heartbeat to Worker " + coordinatorId + " could not be sent: " + e.getMessage());
             return null;
         }
@@ -94,7 +86,7 @@ public final class GrpcCoordinatorProbe implements CoordinatorHealthMonitor.Prob
         return created.channel;
     }
 
-    /** Releases cached channels; the probe cannot be used afterwards. */
+    // Releases cached channels; the probe cannot be used afterwards.
     public synchronized void close() {
         if (closed.compareAndSet(false, true)) {
             for (Peer peer : peers.values()) {

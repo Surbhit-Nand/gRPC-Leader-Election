@@ -8,11 +8,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * A lightweight scale check for the splitter. It deliberately does not calculate ten million
- * primes in CI; endpoint coverage and balance are the properties that can regress under a
- * larger worker count.
- */
+// Check large-range splitting by endpoints and balance without computing the prime results.
 class WorkerTaskDistributorScaleTest {
 
     @Test

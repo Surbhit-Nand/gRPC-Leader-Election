@@ -9,7 +9,7 @@ import java.util.Locale;
 import javax.swing.JTextPane;
 import javax.swing.text.*;
 
-/** Bounded, selectable system log; rendered as styled text rather than HTML. */
+// Bounded, selectable system log; rendered as styled text rather than HTML.
 final class SystemLogPane extends JTextPane {
     enum Level {
         SUCCESS(new Color(20, 135, 75)), INFO(new Color(35, 103, 203)),

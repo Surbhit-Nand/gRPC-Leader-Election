@@ -1,14 +1,4 @@
-// Bootstrap discovery contract.
-// Field numbers are FROZEN once merged: progress.proto sets the precedent,
-// and Members 2-4 build against these shapes.
-//
-// A1 semantics preserved, not renegotiated:
-// - Worker ids are monotonic and never reused within one Bootstrap run;
-//   deregistration does not rewind the counter (matches WorkerRegistration).
-// - Register returns one published peer; the joiner probes it with a deadline.
-// - Duplicate manual ids fail with ALREADY_EXISTS.
-// - port is retained as unused registration metadata for wire compatibility.
-//   All peer RPCs use host and grpc_port.
+// Bootstrap discovery; worker RPCs use host and grpc_port, while port is compatibility metadata.
 syntax = "proto3";
 package distrilab;
 option java_package = "com.cs324.registry.proto";
@@ -37,12 +27,10 @@ message RegisterRequest {
   int32 worker_id = 1;
   string host = 2;
   int32 port = 3;
-  // True mirrors registerWorkerAuto: the server allocates the next monotonic id.
-  // False mirrors registerWorker: the caller claims worker_id (hidden manual path).
+  // Allocate an ID when true; otherwise claim the supplied worker_id.
   bool auto_assign = 4;
   int32 grpc_port = 5;
-  // Publish the gRPC listener after auto-ID registration. Existing identity,
-  // host and contact port must match; this never allocates or reuses an ID.
+  // Publish the listener for an existing identity with matching host and contact port.
   bool update_endpoint = 6;
 }
 

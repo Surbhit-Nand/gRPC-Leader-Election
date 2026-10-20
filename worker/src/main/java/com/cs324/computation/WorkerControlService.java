@@ -6,7 +6,7 @@ import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import java.util.HashSet;
 
-/** gRPC facade over the existing topology and monitoring logic. */
+// gRPC facade over the existing topology and monitoring logic.
 public final class WorkerControlService extends WorkerControlServiceGrpc.WorkerControlServiceImplBase {
     private final WorkerRuntime worker;
     public WorkerControlService(WorkerRuntime worker) { this.worker = worker; }

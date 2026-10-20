@@ -1,17 +1,4 @@
-// Leader-election contract used by every worker.
-// Field numbers are FROZEN once merged. Behavior is NOT specified here and
-// stays with Member 2 (echo wave, JAC-then-highest-id winner rule, duplicate
-// suppression, coordinator announcement relay, 5-job term). This file only
-// fixes the shapes those behaviors travel in.
-//
-// Mapping notes for the implementer:
-// - Every rpc answers an empty ack. A failed hop tells the caller to prune
-//   the edge from the wave and attempt topology repair.
-// - message_id is int64 with the sender id in the high bits (matches the
-//   current ((long) id << 32) | counter scheme); coordinator announcements
-//   keep the +1000000 offset convention out of the election-id space.
-// - Neighbour addressing reuses RegistryService.getWorkerAddress; no new
-//   discovery is introduced here.
+// Election wire contract; preserve field numbers for compatibility.
 syntax = "proto3";
 package distrilab;
 option java_package = "com.cs324.election.proto";
@@ -26,13 +13,7 @@ service ElectionService {
   rpc AnnounceCoordinator(CoordinatorAnnouncement) returns (CoordinatorAck);
 }
 
-// Member 2 additions (additive only; fields 1-4 keep their numbers and meaning):
-// - term (field 5) marks which leadership generation a hop belongs to, so a
-//   stale wave or a late echo from a superseded wave can be recognised instead
-//   of overwriting a newer coordinator.
-// - voters (field 6) is the union of workers that took part in the wave. The
-//   root announces a winner only when that union is a strict majority of the
-//   ready workers known to the directory.
+// Terms reject stale waves; voters identify the workers counted toward a majority.
 message ElectionMessage {
   int32 origin_id = 1;
   int32 candidate_id = 2;
@@ -55,10 +36,7 @@ message EchoMessage {
 
 message EchoAck {}
 
-// term (field 3) is the leadership generation the winner announces. A worker
-// applies an announcement only when (term, coordinator_id) is not older than the
-// pair it already holds, which is what stops a resurrected (deposed) coordinator
-// from reclaiming a term it has already lost.
+// Compare announcements by term, then coordinator ID, to reject older leadership views.
 message CoordinatorAnnouncement {
   int32 coordinator_id = 1;
   int64 message_id = 2;
