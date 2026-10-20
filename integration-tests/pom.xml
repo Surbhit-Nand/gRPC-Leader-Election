@@ -4,8 +4,29 @@
     <parent><groupId>CS324</groupId><artifactId>grpc-leader-election</artifactId><version>1.0-SNAPSHOT</version></parent>
     <artifactId>cluster-integration-tests</artifactId>
     <dependencies>
-        <dependency><groupId>CS324</groupId><artifactId>cluster-bootstrap</artifactId><version>${project.version}</version><scope>test</scope></dependency>
-        <dependency><groupId>CS324</groupId><artifactId>cluster-worker</artifactId><version>${project.version}</version><scope>test</scope></dependency>
-        <dependency><groupId>CS324</groupId><artifactId>cluster-client</artifactId><version>${project.version}</version><scope>test</scope></dependency>
+        <dependency><groupId>CS324</groupId><artifactId>cluster-shared</artifactId><version>${project.version}</version></dependency>
+        <dependency><groupId>CS324</groupId><artifactId>cluster-bootstrap</artifactId><version>${project.version}</version></dependency>
+        <dependency><groupId>CS324</groupId><artifactId>cluster-worker</artifactId><version>${project.version}</version></dependency>
+        <dependency><groupId>CS324</groupId><artifactId>cluster-client</artifactId><version>${project.version}</version></dependency>
     </dependencies>
+    <build>
+        <plugins>
+            <!--
+                All tests live here, while the classes they exercise live in the sibling
+                modules. report-aggregate turns the one jacoco.exec produced by this module
+                into a coverage report over the shared/bootstrap/worker/client artifacts.
+            -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>report-aggregate</id>
+                        <phase>verify</phase>
+                        <goals><goal>report-aggregate</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>

@@ -112,6 +112,25 @@
             </plugin>
         </plugins>
         </pluginManagement>
+        <plugins>
+            <!-- Aggregate coverage is published under each module's target/site/jacoco. -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>0.8.15</version>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals><goal>prepare-agent</goal></goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>verify</phase>
+                        <goals><goal>report</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
     </build>
     <!--
         Convenience profiles: each one only sets the default main class for that
