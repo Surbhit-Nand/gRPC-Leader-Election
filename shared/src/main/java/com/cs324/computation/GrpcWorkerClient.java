@@ -4,7 +4,6 @@ import com.cs324.common.WorkerControl;
 import com.cs324.common.WorkerEvent;
 import com.cs324.control.proto.*;
 import com.cs324.registry.proto.WorkerEndpoint;
-import io.grpc.ManagedChannelBuilder;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -15,9 +14,10 @@ public final class GrpcWorkerClient implements WorkerControl {
     private final WorkerEndpoint endpoint;
     public GrpcWorkerClient(WorkerEndpoint endpoint) { this.endpoint = endpoint; }
     private <T> T call(Function<WorkerControlServiceGrpc.WorkerControlServiceBlockingStub, T> action) {
-        var channel = ManagedChannelBuilder.forAddress(endpoint.getHost(), endpoint.getGrpcPort()).usePlaintext().build();
-        try { return action.apply(WorkerControlServiceGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS)); }
-        finally { channel.shutdownNow(); }
+        // Channels are pooled per peer: probes, assignments and elections all reuse them.
+        var channel = GrpcChannels.get(endpoint.getHost(), endpoint.getGrpcPort());
+        return action.apply(WorkerControlServiceGrpc.newBlockingStub(channel)
+                .withDeadlineAfter(5, TimeUnit.SECONDS));
     }
     public WorkerStatus status() { return call(s -> s.getStatus(StatusRequest.getDefaultInstance())); }
     @Override public int getId() { return endpoint.getWorkerId(); }

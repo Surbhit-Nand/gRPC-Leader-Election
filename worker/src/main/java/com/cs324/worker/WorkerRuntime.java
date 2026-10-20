@@ -1,6 +1,8 @@
 package com.cs324.worker;
 
 import com.cs324.common.ClusterDirectory;
+import com.cs324.common.BoundedMap;
+import com.cs324.common.BoundedSet;
 import com.cs324.common.Constants;
 import com.cs324.common.WorkerAddress;
 import com.cs324.common.WorkerControl;
@@ -53,6 +55,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
     private com.cs324.computation.RegistryClient grpcDirectory;
     private com.cs324.computation.GrpcJobService grpcJobs;
     private String grpcHost = "localhost";
+    private volatile int leaseContactPort;
 
     // All peer election hops use the published gRPC endpoint.
     private volatile ElectionTransport electionTransport;
@@ -69,6 +72,8 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
     private volatile FailoverCoordinator failover;
     private volatile QuorumMonitor quorumMonitor;
     private volatile QuorumProbe quorumProbe;
+    // Refreshes this worker's membership lease without allocating a new identity.
+    private volatile ScheduledExecutorService bootstrapLease;
     // Lease bookkeeping: a leader may serve only while its last majority check is fresh.
     private final AtomicLong lastQuorumMillis = new AtomicLong(0);
     private final AtomicBoolean quorumHealthy = new AtomicBoolean(false);
@@ -114,6 +119,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
     // Publish the actual bound port after registration so peers can connect.
     public void enableGrpcJobs(String bootstrapHost, int bootstrapGrpcPort, String host, int contactPort) {
         grpcHost = host;
+        leaseContactPort = contactPort;
         grpcDirectory = new com.cs324.computation.RegistryClient(bootstrapHost, bootstrapGrpcPort);
         grpcDirectory.publish(id, host, contactPort, getProgressPort());
         // From here on the election wave travels over gRPC, resolved through the same directory.
@@ -146,6 +152,35 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
                 this::readyMemberIds, quorumProbe::reachable, this::markQuorum, this::onQuorumLost,
                 this::logFailover, Constants.QUORUM_LOSS_THRESHOLD, Constants.QUORUM_CHECK_INTERVAL_MS);
         quorumMonitor.start();
+        startBootstrapLease();
+    }
+
+    /**
+     * Keeps the bootstrap membership entry fresh even while the worker is idle. Without this,
+     * a crashed worker would only disappear when the bootstrap reaper ran, but a live worker
+     * would also expire unless registration happened to be repeated by some other subsystem.
+     */
+    private synchronized void startBootstrapLease() {
+        if (bootstrapLease != null) {
+            return;
+        }
+        bootstrapLease = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread thread = new Thread(r, "worker-bootstrap-lease");
+            thread.setDaemon(true);
+            return thread;
+        });
+        bootstrapLease.scheduleWithFixedDelay(() -> {
+            if (grpcDirectory == null) {
+                return;
+            }
+            try {
+                grpcDirectory.publish(id, grpcHost, leaseContactPort, getProgressPort());
+            } catch (RuntimeException e) {
+                recordEvent(WorkerEvent.FAILOVER_DETAIL,
+                        "Bootstrap lease refresh failed: " + e.getMessage());
+            }
+        }, Constants.BOOTSTRAP_LEASE_INTERVAL_MS, Constants.BOOTSTRAP_LEASE_INTERVAL_MS,
+                TimeUnit.MILLISECONDS);
     }
 
     /** Workers that have published a gRPC endpoint; these are the cluster's voting members. */
@@ -246,9 +281,9 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
     private final AtomicInteger jobAllocationCounter = new AtomicInteger(0);
     private final AtomicLong electionCounter = new AtomicLong(0);
     private volatile int currentCoordinatorId = -1;
-    private final Set<Long> seenMessageIds = ConcurrentHashMap.newKeySet();
-    private final Set<Long> seenCoordinatorMessageIds = ConcurrentHashMap.newKeySet();
-    private final Map<Long, ElectionState> elections = new ConcurrentHashMap<>();
+    private final BoundedSet<Long> seenMessageIds = new BoundedSet<>(Constants.ELECTION_MESSAGE_RETENTION);
+    private final BoundedSet<Long> seenCoordinatorMessageIds = new BoundedSet<>(Constants.ELECTION_MESSAGE_RETENTION);
+    private final BoundedMap<Long, ElectionState> elections = new BoundedMap<>(Constants.ELECTION_STATE_RETENTION);
     private final Map<Integer, WorkerControl> neighbours = new ConcurrentHashMap<>();
     // Last-known neighbour set per direct neighbour (2-hop view for grandparent rewire).
     private final Map<Integer, Set<Integer>> twoHop = new ConcurrentHashMap<>();
@@ -1033,6 +1068,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         if (quorumMonitor != null) quorumMonitor.close();
         if (quorumProbe != null) quorumProbe.close();
         if (grpcDirectory != null) grpcDirectory.close();
+        if (bootstrapLease != null) bootstrapLease.shutdownNow();
         if (healthMonitor != null) healthMonitor.close();
         if (probe != null) probe.close();
         if (replicator != null) replicator.close();

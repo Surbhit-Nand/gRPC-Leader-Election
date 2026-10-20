@@ -1,6 +1,8 @@
 package com.cs324.computation;
 
 import com.cs324.job.proto.*;
+import com.cs324.common.BoundedMap;
+import com.cs324.common.Constants;
 import com.cs324.common.WorkerEvent;
 import com.cs324.registry.proto.WorkerEndpoint;
 import com.cs324.progress.ProgressService;
@@ -32,7 +34,7 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
     });
     private final Map<Integer, Run> jobs = new ConcurrentHashMap<>();
     private record Submission(SubmitJobRequest request, CompletableFuture<Void> ready) {}
-    private final Map<Integer, Submission> submissions = new ConcurrentHashMap<>();
+    private final BoundedMap<Integer, Submission> submissions = new BoundedMap<>(Constants.JOB_SUBMISSION_RETENTION);
     private record TaskKey(int job, int task, int attempt) {}
     /** Mutable on purpose: a new coordinator may take over where an attempt must report. */
     private static final class Work {
@@ -42,8 +44,7 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
         TaskAssignment request() { return request; }
         CompletableFuture<TaskResult> result() { return result; }
     }
-    private final Map<TaskKey, Work> tasks = new ConcurrentHashMap<>();
-    private final Set<ManagedChannel> channels = ConcurrentHashMap.newKeySet();
+    private final BoundedMap<TaskKey, Work> tasks = new BoundedMap<>(Constants.JOB_TASK_RETENTION);
     // Replication is optional and additive: without a sink the job service behaves exactly
     // as before, and a failing sink can never fail a job.
     private volatile com.cs324.failover.CheckpointSink checkpoints = com.cs324.failover.CheckpointSink.noop();
@@ -492,12 +493,10 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
 
     /** Sends one already-computed result to its client, used when replaying a tombstone. */
     public boolean deliverResult(SubmitJobRequest request, TaskResult result) {
-        ManagedChannel channel = null;
         try {
             ClientEndpoint client = request.getClient();
             endpoint(client.getHost(), client.getPort());
-            channel = ManagedChannelBuilder.forAddress(client.getHost(), client.getPort()).usePlaintext().build();
-            channels.add(channel);
+            ManagedChannel channel = GrpcChannels.get(client.getHost(), client.getPort());
             // Takeover runs on the worker pool. Only a received acknowledgement proves
             // delivery; scheduling an asynchronous RPC does not.
             ClientServiceGrpc.newBlockingStub(channel).withDeadlineAfter(10, TimeUnit.SECONDS)
@@ -506,8 +505,6 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
         } catch (RuntimeException e) {
             System.err.println("Cannot replay job result: " + e.getMessage());
             return false;
-        } finally {
-            if (channel != null) { channels.remove(channel); channel.shutdownNow(); }
         }
     }
 
@@ -524,18 +521,16 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
     }
     private <T> void send(String host, int port, BiConsumer<ManagedChannel, StreamObserver<T>> call, Consumer<Throwable> failure) {
         if (closed) return;
-        ManagedChannel channel=ManagedChannelBuilder.forAddress(host, port).usePlaintext().build();
-        channels.add(channel);
+        ManagedChannel channel = GrpcChannels.get(host, port);
         try {
             // Acknowledging ReportTaskResult ends its inbound RPC context. The
             // independent client callback must survive that acknowledgement.
             Context.ROOT.run(() -> call.accept(channel, new StreamObserver<>() {
                 public void onNext(T value) { }
-                public void onError(Throwable error) { release(); failure.accept(error); }
-                public void onCompleted() { release(); }
-                private void release() { channels.remove(channel); channel.shutdown(); }
+                public void onError(Throwable error) { failure.accept(error); }
+                public void onCompleted() { }
             }));
-        } catch (RuntimeException e) { channels.remove(channel); channel.shutdownNow(); failure.accept(e); }
+        } catch (RuntimeException e) { failure.accept(e); }
     }
     private static void endpoint(String host,int port) {
         if (host.isBlank() || port<1 || port>65535) throw new IllegalArgumentException("A valid endpoint is required");
@@ -546,5 +541,5 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
         return (error instanceof IllegalArgumentException ? Status.INVALID_ARGUMENT : Status.UNAVAILABLE)
                 .withDescription(error.getMessage()).withCause(error).asRuntimeException();
     }
-    @Override public void close() { closed = true; timer.shutdownNow(); channels.forEach(ManagedChannel::shutdownNow); channels.clear(); }
+    @Override public void close() { closed = true; timer.shutdownNow(); }
 }
