@@ -108,6 +108,24 @@ class ClusterMonitorTest {
     }
 
     @Test
+    void subsequentPollDiscoversNewWorkerAndReportsJoin() throws Exception {
+        register(1, 48881);
+        stub(1, 0, 1, Set.of());
+        Map<Integer, Long> lastSeq = new HashMap<>();
+        var before = ClusterMonitor.pollWithEvents(bootstrap, lookup, lastSeq);
+
+        register(2, 48882);
+        stub(2, 0, 1, Set.of(1));
+        var after = ClusterMonitor.pollWithEvents(bootstrap, lookup, lastSeq);
+
+        assertEquals(List.of(1, 2), after.snapshot().rows().stream()
+                .map(ClusterMonitor.WorkerRow::workerId).toList());
+        assertTrue(after.snapshot().rows().get(1).alive());
+        assertTrue(ClusterMonitor.diff(before.snapshot(), after.snapshot()).stream()
+                .anyMatch(event -> event.text().contains("Worker 2 joined")));
+    }
+
+    @Test
     void pollMarksMissingStubAsUnreachableRow() throws Exception {
         register(1, 48881);
         register(2, 48882);

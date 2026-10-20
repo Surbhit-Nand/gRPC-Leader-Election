@@ -102,6 +102,9 @@ public class ClientApp extends JFrame {
     private final SystemLogPane clusterFeed = new SystemLogPane();
     private final JCheckBox autoScroll = new JCheckBox("Auto-scroll", true);
     private final JLabel clusterStatusLabel = new JLabel("Connecting to cluster...");
+    private final JButton refreshButton = button("Refresh", "refresh", false);
+    // Accessed only on the Swing event thread.
+    private boolean manualRefreshPending;
     private static final int CLUSTER_POLL_MS = 2000;
     private ClusterMonitor.ClusterSnapshot lastClusterSnapshot;
     private final Object clusterLock = new Object();
@@ -409,10 +412,16 @@ public class ClientApp extends JFrame {
         JPanel heading = transparentPanel(new BorderLayout());
         heading.add(sectionHeading("Cluster activity",
                 "King: coordinator. Pawns: workers. Live cluster activity.", "knight"), BorderLayout.CENTER);
-        JButton refreshButton = button("Refresh", "refresh", false);
         refreshButton.setMnemonic('R');
         refreshButton.setToolTipText("Poll the cluster now instead of waiting for the next update.");
-        refreshButton.addActionListener(event -> refreshClusterNow());
+        refreshButton.addActionListener(event -> {
+            if (clusterPollInFlight.get()) {
+                manualRefreshPending = true;
+                clusterStatusLabel.setText("Refresh queued \u2014 checking membership again after this update...");
+            } else {
+                refreshClusterNow(true);
+            }
+        });
         heading.add(refreshButton, BorderLayout.EAST);
         cluster.add(heading, BorderLayout.NORTH);
 
@@ -536,20 +545,27 @@ public class ClientApp extends JFrame {
     // One poll off the EDT: snapshot the cluster, diff against the last view,
     // then paint the table and feed on the event thread.
     private void refreshClusterNow() {
+        refreshClusterNow(false);
+    }
+
+    private void refreshClusterNow(boolean manual) {
         if (!clusterPollInFlight.compareAndSet(false, true)) {
             return;
         }
+        if (manual) {
+            refreshButton.setText("Refreshing...");
+            clusterStatusLabel.setText("Refreshing cluster membership...");
+        }
         new Thread(() -> {
             try {
-                connectBackend();
+                connectDirectory();
                 ClusterMonitor.PollResult result = ClusterMonitor.pollWithEvents(bootstrap,
-                        (workerId, address) -> {
-                            try {
-                                return lookupWorker(workerId, address);
-                            } catch (Exception e) {
-                                return null;
-                            }
-                        }, eventSeqByWorker);
+                        (workerId, address) -> address.getGrpcPort() < 1 ? null
+                                : new com.cs324.computation.GrpcWorkerClient(
+                                        com.cs324.registry.proto.WorkerEndpoint.newBuilder()
+                                                .setWorkerId(workerId).setHost(address.getHost())
+                                                .setGrpcPort(address.getGrpcPort()).build()),
+                        eventSeqByWorker);
                 List<ClusterMonitor.ClusterEvent> heuristic;
                 synchronized (clusterLock) {
                     heuristic = ClusterMonitor.diff(lastClusterSnapshot, result.snapshot(),
@@ -566,7 +582,14 @@ public class ClientApp extends JFrame {
                 SwingUtilities.invokeLater(() ->
                         clusterStatusLabel.setText("Cluster unreachable \u2014 retrying..."));
             } finally {
-                clusterPollInFlight.set(false);
+                SwingUtilities.invokeLater(() -> {
+                    clusterPollInFlight.set(false);
+                    if (manual) refreshButton.setText("Refresh");
+                    if (manualRefreshPending && isDisplayable()) {
+                        manualRefreshPending = false;
+                        refreshClusterNow(true);
+                    }
+                });
             }
         }, "cluster-monitor-poll").start();
     }
@@ -699,17 +722,20 @@ public class ClientApp extends JFrame {
         return CsvInputLoader.parse(text, (String) jobTypeBox.getSelectedItem());
     }
 
+    // Monitoring needs discovery only, even when a job callback port is unavailable.
+    private synchronized void connectDirectory() {
+        if (grpcDirectory == null) grpcDirectory = new com.cs324.computation.RegistryClient(bootstrapHost, bootstrapGrpcPort);
+        if (bootstrap == null) bootstrap = grpcDirectory;
+    }
+
     // Lazy setup under the monitor, so submissions share one callback server and directory client.
     private synchronized void connectBackend() throws Exception {
+        connectDirectory();
         if (resultServer == null) {
             resultServer = io.grpc.ServerBuilder.forPort(clientPort)
                     .addService(new com.cs324.computation.ClientResultService((jobId, result) ->
                             SwingUtilities.invokeLater(() -> onResult(jobId, result))))
                     .build().start();
-        }
-        if (grpcDirectory == null) grpcDirectory = new com.cs324.computation.RegistryClient(bootstrapHost, bootstrapGrpcPort);
-        if (bootstrap == null) {
-            bootstrap = grpcDirectory;
         }
     }
 
