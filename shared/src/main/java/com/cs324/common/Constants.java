@@ -80,4 +80,23 @@ public class Constants {
     // Floor for the deadline of a restored job: a job that was nearly out of time still gets
     // a fair chance to finish after its coordinator was replaced.
     public static final long FAILOVER_MIN_REMAINING_MS = 30_000;
+
+    // ---- Bootstrap membership leases and retention ----
+
+    // Workers refresh their directory entry this often. Publication is idempotent, so this
+    // is also the liveness heartbeat for the bootstrap registry.
+    public static final int BOOTSTRAP_LEASE_INTERVAL_MS = 5_000;
+
+    // A worker that stops refreshing its entry is removed after this silence. The margin over
+    // the refresh interval tolerates one delayed RPC without dropping a live worker.
+    public static final int BOOTSTRAP_WORKER_TTL_MS = 15_000;
+
+    // Retain enough recent jobs and tasks for duplicate-submission and retry windows while
+    // keeping a long-lived coordinator's memory bounded.
+    public static final int JOB_SUBMISSION_RETENTION = 1_024;
+    public static final int JOB_TASK_RETENTION = 4_096;
+
+    // Election waves and coordinator messages are only deduplicated for recent history.
+    public static final int ELECTION_STATE_RETENTION = 512;
+    public static final int ELECTION_MESSAGE_RETENTION = 4_096;
 }
