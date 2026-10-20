@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Build the CS324 Assignment 2 Word report.
+"""Build the CS324 Assignment 2 report.
 
-The document is intentionally plain OOXML generated with python-docx: no
+The Word document is intentionally plain OOXML generated with python-docx: no
 pandoc/LibreOffice dependency, and it can be regenerated after the group fills
-in the highlighted placeholders.
+in the highlighted placeholders. build_pdf.ps1 exports the Word file to the
+submission PDF with Microsoft Word.
 """
 
 from __future__ import annotations
@@ -26,6 +27,44 @@ GIT_LOG = ROOT / "report" / "git-log.txt"
 NAVY = RGBColor(0x1F, 0x38, 0x64)
 STEEL = RGBColor(0x2E, 0x5A, 0x88)
 GREY = RGBColor(0x59, 0x59, 0x59)
+
+ELECTION_PROTO = """syntax = "proto3";
+package distrilab;
+option java_package = "com.cs324.election.proto";
+option java_multiple_files = true;
+
+service ElectionService {
+  rpc SendElection(ElectionMessage) returns (ElectionAck);
+  rpc SendEcho(EchoMessage) returns (EchoAck);
+  rpc AnnounceCoordinator(CoordinatorAnnouncement) returns (CoordinatorAck);
+}
+
+message ElectionMessage {
+  int32 origin_id = 1;
+  int32 candidate_id = 2;
+  int32 candidate_jac = 3;
+  int64 message_id = 4;
+  int64 term = 5;
+  repeated int32 voters = 6;
+}
+message ElectionAck {}
+
+message EchoMessage {
+  int64 message_id = 1;
+  int32 from_worker_id = 2;
+  int32 best_candidate_id = 3;
+  int32 best_candidate_jac = 4;
+  int64 term = 5;
+  repeated int32 voters = 6;
+}
+message EchoAck {}
+
+message CoordinatorAnnouncement {
+  int32 coordinator_id = 1;
+  int64 message_id = 2;
+  int64 term = 3;
+}
+message CoordinatorAck {}"""
 
 
 def shade(cell, fill: str) -> None:
@@ -87,6 +126,20 @@ def bullets(doc, items):
     for item in items:
         paragraph = doc.add_paragraph(item, style="List Bullet")
         paragraph.paragraph_format.space_after = Pt(3)
+
+
+def numbered(doc, items):
+    for item in items:
+        paragraph = doc.add_paragraph(item, style="List Number")
+        paragraph.paragraph_format.space_after = Pt(3)
+
+
+def reference(doc, text: str):
+    paragraph = doc.add_paragraph(text)
+    paragraph.paragraph_format.left_indent = Inches(0.35)
+    paragraph.paragraph_format.first_line_indent = Inches(-0.35)
+    paragraph.paragraph_format.space_after = Pt(6)
+    return paragraph
 
 
 def code_block(doc, text: str, size: float = 8):
@@ -232,6 +285,14 @@ def main() -> None:
     run.font.bold = True
     run.font.color.rgb = NAVY
 
+    part = doc.add_paragraph()
+    part.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    part.paragraph_format.space_after = Pt(8)
+    run = part.add_run("Part 1: Report")
+    run.font.size = Pt(17)
+    run.font.bold = True
+    run.font.color.rgb = STEEL
+
     subtitle = doc.add_paragraph()
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
     subtitle.paragraph_format.space_after = Pt(30)
@@ -291,58 +352,49 @@ def main() -> None:
               "a small acknowledgement; a failed hop is a signal to prune that edge and repair the "
               "topology rather than a reason to retry forever.")
 
-    heading(doc, "Contract and message fields", level=2)
-    add_table(
-        doc,
-        ["RPC / message", "Important fields", "Purpose"],
-        [
-            ("SendElection(ElectionMessage)", "origin_id, candidate_id, candidate_jac, message_id, term, voters",
-             "Forward the current best candidate around one wave."),
-            ("SendEcho(EchoMessage)", "message_id, from_worker_id, best_candidate_id, best_candidate_jac, term, voters",
-             "Return a subtree's best candidate and participating voter set."),
-            ("AnnounceCoordinator(CoordinatorAnnouncement)", "coordinator_id, message_id, term",
-             "Install a new (term, coordinator) view; duplicates are not relayed."),
-        ],
-        widths=[1.75, 2.55, 2.85],
-        font_size=10,
-    )
+    heading(doc, "Service contract", level=2)
+    body(doc, "The frozen contract below is the only interface used for election traffic. Generated "
+              "Java stubs are shared by bootstrap, worker, client and integration tests.")
+    code_block(doc, ELECTION_PROTO, size=7.5)
     body(doc, "message_id is generated from the sender identity and a local counter, so two roots "
               "cannot accidentally create the same wave. term is the leadership generation. voters "
               "is the union of workers that participated, and is used for the majority check before "
               "an announcement is allowed.")
 
-    heading(doc, "Protocol", level=2)
+    heading(doc, "Method responsibilities", level=2)
+    lead(doc, "SendElection.", "The root votes for itself and sends its candidate to every neighbour. "
+         "A receiver compares (JAC, worker ID), forwards the winning candidate to every neighbour "
+         "except its parent, and records the voters it has seen. A duplicate message_id is not "
+         "silently dropped: the receiver echoes the best candidate it already knows, so a cycle "
+         "cannot leave a parent waiting forever.")
+    lead(doc, "SendEcho.", "When all pending children have answered, a node merges their best "
+         "candidates and voter sets with its own and sends one echo to its parent. A per-wave lock "
+         "prevents a duplicate echo from completing the same wave twice. The root therefore learns "
+         "the winner and the full participating set without all-to-all communication.")
+    lead(doc, "AnnounceCoordinator.", "The root announces only after the voter union is a strict "
+         "majority of ready workers known through the bootstrap directory. Otherwise it records "
+         "ELECTION_NO_QUORUM and announces nobody. The announcement carries a newer term; a worker "
+         "accepts the (term, coordinator ID) pair once and rejects stale or termless announcements.")
+
+    heading(doc, "Election rule", level=2)
     bullets(doc, [
-        "A root votes for itself and sends a wave to every neighbour with candidate_jac equal to its "
-        "job-allocation counter (JAC) and candidate_id equal to its worker ID.",
-        "A receiver compares its own (JAC, ID) with the incoming candidate. A lower JAC wins; if the "
-        "JACs are equal, the higher worker ID wins. The receiver then forwards the winning candidate "
-        "to every neighbour except its parent.",
-        "A repeated message_id is not silently dropped. The receiver echoes the best candidate it "
-        "already knows. Silence would leave a sender waiting forever when a cycle delivers the same "
-        "wave twice.",
-        "When all pending children have answered, a node echoes once to its parent. Echo merging and "
-        "the pending-child set are protected by a per-wave lock, so a duplicate echo cannot complete "
-        "a wave twice.",
-        "At the root, the wave is complete when no children remain. The root announces the winner "
-        "only if the recognised voter set is a strict majority of the ready workers known through "
-        "the bootstrap directory. Otherwise it records ELECTION_NO_QUORUM and announces nobody.",
-        "Announcements carry a term higher than the terms observed by the wave. A worker accepts a "
-        "newer (term, coordinator ID) pair and rejects stale or termless announcements, so a "
-        "deposed coordinator cannot reclaim leadership.",
+        "A lower job-allocation counter (JAC) wins; when JACs are equal, the higher worker ID wins. "
+        "This preserves the Assignment 1 load-balancing metric instead of electing by ID alone.",
+        "A root that cannot collect a strict majority never announces a coordinator, so a minority "
+        "partition cannot install a leader by itself.",
+        "After the winner is known, QuorumMonitor probes ready workers every second with a 600 ms "
+        "deadline, renews a 2.5-second lease, and forces a step-down after two failed checks. A "
+        "leader without a majority cannot accept new work, preventing split brain.",
+        "Terms increase with each election and are attached to announcements, so a deposed "
+        "coordinator cannot reclaim leadership with an old message.",
     ])
 
     heading(doc, "Why an echo wave", level=2)
     body(doc, "The unstructured network may be a chain, a triangle or a larger mesh, and edges can "
               "disappear while a wave is in flight. The echo wave converges on any connected graph, "
-              "uses only local knowledge, and does not require a global clock or a ring order. It "
-              "also lets each node contribute its JAC, which is the Assignment 1 load-balancing "
-              "metric. The cost is O(E) messages per wave, acceptable for the assignment scale. "
-              "After the winner is known, a majority lease keeps it honest: QuorumMonitor probes "
-              "ready workers with WorkerControlService.GetStatus every second, renews a 2.5-second "
-              "lease, and forces the leader to step down after two failed checks. A leader that "
-              "cannot reach a majority cannot accept new work, which prevents two disconnected "
-              "minorities from both serving clients.")
+              "uses only local knowledge, and needs no global clock or ring order. It also lets every "
+              "node contribute its JAC. The cost is O(E) messages per wave, acceptable at assignment "
+              "scale, and the same exchange supplies the voter set used for the majority check.")
 
     # ------------------------------------------------------------------ Q2
     page_break(doc)
@@ -408,18 +460,27 @@ def main() -> None:
 
     heading(doc, "Coordinator health", level=2)
     body(doc, "CoordinatorHealthMonitor sends a bounded FailoverService.Heartbeat to the current "
-              "coordinator. The health rule has three states:")
-    bullets(doc, [
-        "ALIVE: the heartbeat answered within the slow threshold (400 ms).",
-        "SUSPECT: the heartbeat answered, but took longer than 400 ms. The peer is demonstrably up, so this does not start an election; it only raises suspicion.",
-        "FAILED: three consecutive probes were missed, or there has been no successful probe for eight seconds. At that point FailureGate admits one failover request for this failure window, suppressing a wave per survivor.",
-    ])
+              "coordinator. CoordinatorHealth classifies each result without performing I/O:")
+    add_table(
+        doc,
+        ["State", "Condition", "Response"],
+        [
+            ("ALIVE", "Successful heartbeat within the 400 ms slow threshold.",
+             "Reset the miss counter; keep serving and monitoring."),
+            ("SUSPECT", "Successful but slow heartbeat, or one or two consecutive misses.",
+             "Keep monitoring; a slow peer is demonstrably up, so no election starts."),
+            ("FAILED", "Three consecutive misses, or no success for eight seconds.",
+             "FailureGate admits one failover request for this failure window, then survivors elect."),
+        ],
+        widths=[0.8, 2.85, 3.5],
+        font_size=9.5,
+    )
     body(doc, "The per-call deadline is 600 ms and the interval is 1000 ms, so a probe cannot overlap "
               "the next one indefinitely. A timeout is only one miss; the threshold of three tolerates "
               "a GC pause or a transient scheduler delay. The eight-second silence rule prevents an "
               "earlier success from masking a peer that has stopped answering mid-window. These "
-              "constants are in shared/src/main/java/com/cs324/common/Constants.java and are covered "
-              "by CoordinatorHealthTest and CoordinatorFailoverTest.")
+              "constants are in Constants.java and are covered by CoordinatorHealthTest and "
+              "CoordinatorFailoverTest.")
     body(doc, "A coordinator also has to prove that it still has a majority. QuorumMonitor probes "
               "each ready worker's WorkerControlService.GetStatus every second with a 600 ms "
               "deadline. Self and each reachable member count as a vote; the threshold is "
@@ -460,6 +521,28 @@ def main() -> None:
               "the submission returns retryable UNAVAILABLE, no computation starts, and the reserved "
               "job-budget slot is released. At least two live workers are therefore needed to accept "
               "new work.")
+
+    heading(doc, "State recovered after a takeover", level=2)
+    add_table(
+        doc,
+        ["State", "What the checkpoint keeps", "Why it matters"],
+        [
+            ("Job record", "Job ID, computation type, original request and client endpoint.",
+             "Rebuild the submission without asking the client to resend it."),
+            ("Task slices", "Task ID, payload, assigned worker and attempt number.",
+             "Preserve completed work and identify what must be reassigned."),
+            ("Execution result", "Per-slice result and the attempt that produced it.",
+             "Retain useful work and reject late results from an older attempt."),
+            ("Job outcome", "Final aggregate and a client-delivery flag.",
+             "Avoid recomputation and resend a result whose callback was not acknowledged."),
+            ("Timing", "Original acceptance timestamp and remaining budget.",
+             "Reconstruct the deadline, with a minimum recovery allowance."),
+            ("Ordering metadata", "Per-job sequence, leadership term and coordinator ID.",
+             "Fold updates idempotently and reject stale or duplicate state."),
+        ],
+        widths=[1.05, 3.1, 3.0],
+        font_size=9.5,
+    )
 
     heading(doc, "Replicated checkpoint log", level=2)
     body(doc, "Each checkpoint entry has a job ID, a per-job sequence, the producing term and "
@@ -508,63 +591,93 @@ def main() -> None:
 
     # ------------------------------------------------------------------ Q5
     page_break(doc)
-    heading(doc, "Q5. Alternatives considered and justification", level=1)
-    body(doc, "The assignments constrain the design: a small, unreliable, unstructured network of "
-              "worker processes, no fixed leader, multiple clients, Java threads and demonstrable "
-              "recovery. Several designs would satisfy part of that brief; the chosen design is the "
-              "one with the best balance of correctness, implementation risk and demo latency.")
+    heading(doc, "Q5. Overall failure detection and recovery strategies", level=1)
+    body(doc, "DistriLab combines five mechanisms because each addresses a different failure: "
+              "unreachability, conflicting leadership, lost work, stale messages and a failed "
+              "client callback. The design targets a small, unreliable, unstructured worker network "
+              "and must recover without manual restart.")
 
+    heading(doc, "Selected strategies and justification", level=2)
+    lead(doc, "Heartbeat monitoring.", "Followers probe the coordinator every 1,000 ms with a 600 ms "
+         "deadline. A successful response under 400 ms is ALIVE; a slower response or one or two "
+         "misses is SUSPECT; three misses or eight seconds without success is FAILED. This avoids an "
+         "election after a single delayed reply, while still detecting a process that has stopped.")
+    lead(doc, "Echo-wave election.", "Election messages follow the current neighbour graph and echoes "
+         "merge each subtree's best candidate and voters. The lowest JAC wins, with the highest worker "
+         "ID as tie-breaker. The initiator announces only with a strict majority of ready workers, "
+         "which suits an unstructured overlay better than an ID-ordered Bully or ring.")
+    lead(doc, "Majority-quorum protection.", "QuorumMonitor probes ready workers every second, uses a "
+         "600 ms deadline, clears the view after two failed checks and renews a 2,500 ms lease. New "
+         "jobs require a fresh lease. A leader in a minority partition therefore stops accepting work "
+         "instead of creating conflicting results, prioritising safety over availability.")
+    lead(doc, "Replicated checkpoints.", "JobAccepted, SliceUpdated and JobFinished entries are "
+         "replicated to peers with per-job sequence numbers and terms. At least one peer must confirm "
+         "acceptance before the client is told the job was accepted. Later updates are asynchronous, "
+         "which keeps submission responsive but means the newest intermediate update may be lost.")
+    lead(doc, "Task reassignment and duplicate control.", "When an owner is unreachable, its unfinished "
+         "slices are reassigned with an incremented attempt. Stable task IDs and checkpointed results "
+         "preserve completed units and reject a late result from an older attempt. This is cheaper "
+         "than restarting the whole job and is safer than accepting the first reply blindly.")
+
+    heading(doc, "Alternatives considered", level=2)
     add_table(
         doc,
-        ["Alternative", "Strengths", "Why it was not chosen / how it influenced the design"],
+        ["Alternative", "Attraction", "Why the chosen design differs"],
         [
-            ("Fixed central coordinator",
-             "Very simple; no election; easy to test.",
-             "Single point of failure and does not satisfy leader election. Retained only as the bootstrap directory, which is not the job coordinator."),
-            ("Bully or ring election",
-             "Deterministic; low message count on a stable ordered ring.",
-             "Depends on IDs and a stable order; an unstructured, healing mesh makes ring maintenance and failure handling awkward."),
-            ("Heartbeat + gossip membership",
-             "Scales well; eventually consistent; tolerant of churn.",
-             "Gossip convergence is slower than a bounded heartbeat for a demo, and it still needs a majority rule to avoid split brain. Bounded heartbeats fit this scale."),
-            ("Full Raft or Paxos",
-             "Durable, strongly consistent replicated log; well-understood safety proofs.",
-             "Substantially more implementation and test complexity than the assignment requires. The project uses a majority lease plus replicated checkpoints, not a full consensus log."),
-            ("Disk WAL / quorum commit",
-             "Survives process and machine restarts; stronger durability.",
-             "Adds storage, compaction and recovery complexity. The assignment demo is in-memory; the limitation is stated explicitly."),
-            ("Synchronous replication to every replica",
-             "Stronger before-ack durability.",
-             "Higher submission latency and lower availability when any replica is slow. One confirmed acknowledgement is the documented compromise."),
-            ("Polling for progress",
-             "No streaming API; simple request/response.",
-             "Not real-time and produces either stale bars or heavy polling. gRPC server streaming matches the requirement directly."),
+            ("Fixed central coordinator", "No election and simple testing.",
+             "It is a single point of failure and fails the leader-election requirement. The bootstrap remains only a directory."),
+            ("Bully or ring election", "Deterministic and low message count on an ordered ring.",
+             "An unstructured, healing mesh has no stable ring, and ID order ignores the JAC load metric."),
+            ("Gossip membership", "Scales and tolerates churn.",
+             "Convergence is slower for a demo and still needs a majority rule to avoid split brain."),
+            ("Full Raft or Paxos", "Durable, strongly consistent replicated log.",
+             "Much greater implementation and test complexity; the project uses a majority lease and replicated checkpoints, not a consensus library."),
+            ("Polling for progress", "No streaming API.",
+             "It is not real-time and causes stale bars or heavy polling; gRPC server streaming fits the requirement."),
         ],
-        widths=[1.45, 2.25, 3.45],
+        widths=[1.35, 2.15, 3.65],
         font_size=9.5,
     )
 
-    heading(doc, "Justification", level=2)
-    body(doc, "The echo wave plus strict-majority announcement provides leader election on an "
-              "arbitrary connected graph. The majority lease addresses the failure mode that a "
-              "simple election alone does not: a leader isolated with a minority must stop serving. "
-              "The checkpoint design addresses the other failure mode: the coordinator dying with "
-              "accepted work that only it knew about. Requiring one peer acknowledgement before "
-              "the client is told the job was accepted is the smallest change that makes the "
-              "failure window meaningful, while keeping the demo responsive.")
-    body(doc, "Full Raft would give a stronger guarantee, but it would also change the project's "
-              "centre of gravity from 'distributed worker cluster with election and recovery' to "
-              "'implement and verify a consensus library'. The chosen design is honest about its "
-              "boundary: it has a majority lease, term-based leadership, bounded failure detection "
-              "and replicated checkpoints, but it is not a durable consensus log. That is a "
-              "reasonable engineering choice for the assignment scale and is documented for the "
-              "reader.")
-    body(doc, "For a production version, the next steps would be a persistent write-ahead log with "
-              "quorum commit, TLS and authenticated worker identities, bounded queues with "
-              "backpressure, and metrics/tracing for failure detection. Those are extensions, not "
-              "prerequisites for the demonstrated behaviour. The implementation already uses "
-              "bounded retention for old jobs, tasks, election waves and finished checkpoints, so "
-              "the in-memory design does not grow without limit during a long demo.")
+    heading(doc, "Recovery sequence", level=2)
+    numbered(doc, [
+        "Detect an unresponsive worker or coordinator through gRPC deadlines, refused connections "
+        "and the health state machine.",
+        "For a coordinator failure, start the echo wave and require strict-majority participation "
+        "before announcing a replacement.",
+        "Install the new coordinator with a higher term; reject stale announcements and step down a "
+        "leader that loses its quorum lease.",
+        "Fetch checkpoint snapshots from reachable peers, merge by job and sequence, and preserve "
+        "completed slices.",
+        "Reassign unfinished slices from unreachable owners with new attempts; resume progress "
+        "reporting from recovered state.",
+        "Redeliver a completed result whose client callback was not acknowledged. Delivery is "
+        "at-least-once, so the client deduplicates by job ID.",
+    ])
+
+    heading(doc, "Limitations and conclusion", level=2)
+    body(doc, "A timeout proves unreachability, not a crash: a slow or isolated process can look "
+              "failed. Asynchronous replication can omit the last intermediate checkpoint, and a "
+              "cluster without a majority deliberately rejects new work. Checkpoints are in memory, "
+              "so losing every replica loses recovery state. The bootstrap is a single directory, "
+              "and callbacks are at-least-once. These limits are documented in docs/failover.md and "
+              "are preferable to claiming durability the implementation does not provide.")
+    body(doc, "The combination is appropriate for the assignment: it elects on an arbitrary graph, "
+              "prevents a minority leader from serving, preserves accepted work across a coordinator "
+              "change and recovers unfinished slices without restarting every job. Full Raft would "
+              "give stronger durability but would replace the assignment's focus with a consensus "
+              "implementation. Bounded retention for jobs, tasks, election waves and finished "
+              "checkpoints keeps the in-memory design stable during a long demo.")
+
+    # ------------------------------------------------------------------ references
+    page_break(doc)
+    heading(doc, "References", level=1)
+    reference(doc, "Google. (n.d.). gRPC documentation. https://grpc.io/docs/")
+    reference(doc, "Google. (n.d.). Protocol Buffers documentation. https://protobuf.dev/")
+    reference(doc, "Oracle. (n.d.). Java Remote Method Invocation (Java RMI). "
+                   "https://docs.oracle.com/javase/8/docs/technotes/guides/rmi/")
+    reference(doc, "Van Steen, M., & Tanenbaum, A. S. (2025). Distributed systems (4th ed., "
+                   "Version 4.03). Sections 4.2 and 5.4; Chapters 7 and 8.")
 
     # ------------------------------------------------------------------ appendix A
     page_break(doc)

@@ -13,3 +13,5 @@ nbdist/
 # Local bootstrap ID counter store; generated on first run.
 bootstrap-state.properties
 bootstrap-state.properties.tmp
+__pycache__/
+*.pyc
