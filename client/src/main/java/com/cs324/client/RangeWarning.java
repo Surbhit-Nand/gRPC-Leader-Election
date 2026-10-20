@@ -26,7 +26,7 @@ public final class RangeWarning {
         }
         String size = "%,d".formatted(width) + (width == 1 ? " number" : " numbers");
         if (width > HOURS_FROM_WIDTH) {
-            return "This PRIMESUM scans " + size + " and will likely take hours â€” "
+            return "This PRIMESUM scans " + size + " and will likely take hours \u2014 "
                     + "values near 2,147,483,647 cost the most each. Submit anyway?";
         }
         return "This PRIMESUM scans " + size + " and will likely take minutes "

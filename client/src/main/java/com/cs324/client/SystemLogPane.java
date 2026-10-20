@@ -12,8 +12,8 @@ import javax.swing.text.*;
 /** Bounded, selectable system log; rendered as styled text rather than HTML. */
 final class SystemLogPane extends JTextPane {
     enum Level {
-        SUCCESS(new Color(20, 135, 75)), INFO(new Color(35, 103, 203)),
-        WARNING(new Color(174, 96, 0)), ERROR(new Color(196, 37, 59));
+        SUCCESS(Color.BLACK), INFO(Color.BLACK),
+        WARNING(Color.BLACK), ERROR(new Color(196, 37, 59));
         final Color color;
         Level(Color color) { this.color=color; }
     }
@@ -53,7 +53,7 @@ final class SystemLogPane extends JTextPane {
                 int tag=text.lastIndexOf(" [");
                 if (tag>=0 && text.substring(tag).matches(" \\[(MAX|PRIMESUM|PRIMECOUNT)\\]")) {
                     insert(document,text.substring(0,tag)+" ",color,false,null);
-                    insert(document,text.substring(tag+1),color,true,ClientStyle.LIGHT_BLUE);
+                    insert(document,text.substring(tag+1),color,true,ClientStyle.SURFACE);
                 } else insert(document,text,color,false,null);
                 insert(document,"\n",color,false,null);
             }

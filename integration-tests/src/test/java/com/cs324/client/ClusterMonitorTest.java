@@ -296,6 +296,37 @@ class ClusterMonitorTest {
     }
 
     @Test
+    void routineDiagnosticsAreHiddenButHealthTransitionsRemainVisible() throws Exception {
+        register(1, 48881);
+        ConfigurableWorker worker = new ConfigurableWorker(1, 0, 1, Set.of());
+        stubs.put(1, worker);
+        Map<Integer, Long> lastSeq = new HashMap<>();
+        ClusterMonitor.pollWithEvents(bootstrap, lookup, lastSeq);
+        worker.script = List.of(
+                new WorkerEvent(0, 1, 1000L, WorkerEvent.FAILOVER_DETAIL,
+                        "heartbeat to Worker 2 could not be sent: unavailable"),
+                new WorkerEvent(1, 1, 1001L, WorkerEvent.FAILOVER_DETAIL,
+                        "COORDINATOR_FAILED: Worker 2 missed probes"),
+                new WorkerEvent(2, 1, 1002L, WorkerEvent.FAILOVER_DETAIL,
+                        "coordinator Worker 2 is answering normally again"),
+                new WorkerEvent(3, 1, 1003L, WorkerEvent.CHECKPOINT_REPLICATED,
+                        "job 1 sequence 3"),
+                new WorkerEvent(4, 1, 1004L, WorkerEvent.FAILOVER_DETAIL,
+                        "replicated 1 checkpoint entries to Worker 2"),
+                new WorkerEvent(5, 1, 1005L, WorkerEvent.FAILOVER_DETAIL,
+                        "checkpoint push to Worker 2 failed (UNAVAILABLE)"));
+
+        var result = ClusterMonitor.pollWithEvents(bootstrap, lookup, lastSeq);
+
+        assertEquals(3, result.workerEvents().size());
+        assertTrue(result.workerEvents().get(0).text().contains("COORDINATOR_FAILED"));
+        assertTrue(result.workerEvents().get(1).text().contains("answering normally again"));
+        assertTrue(result.workerEvents().get(2).text().contains("checkpoint push"));
+        assertEquals(5L, lastSeq.get(1));
+        assertTrue(ClusterMonitor.pollWithEvents(bootstrap, lookup, lastSeq).workerEvents().isEmpty());
+    }
+
+    @Test
     void exactRewireEventsSuppressTheHeuristicLine() {
         ClusterMonitor.ClusterSnapshot before = new ClusterMonitor.ClusterSnapshot(
                 List.of(new ClusterMonitor.WorkerRow(1, "localhost", 3501, 2, Set.of(2), 0, true)), 2);

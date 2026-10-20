@@ -119,10 +119,27 @@ public final class ClusterMonitor {
         }
         Set<String> kinds = exactKinds.computeIfAbsent(row.workerId(), k -> new HashSet<>());
         for (WorkerEvent event : fresh) {
+            if (isRoutineDiagnostic(event)) {
+                continue;
+            }
             kinds.add(event.kind());
             out.add(new ClusterEvent(Instant.ofEpochMilli(event.epochMillis()),
                     "Worker " + event.workerId() + ": " + event.detail()));
         }
+    }
+
+    // Advance the sequence cursor even for hidden diagnostics, so they are never replayed.
+    // Health transitions (suspected/failed/recovered) remain visible as separate events.
+    private static boolean isRoutineDiagnostic(WorkerEvent event) {
+        if (WorkerEvent.CHECKPOINT_REPLICATED.equals(event.kind())) {
+            return true;
+        }
+        if (!WorkerEvent.FAILOVER_DETAIL.equals(event.kind())) {
+            return false;
+        }
+        String detail = event.detail().toLowerCase(java.util.Locale.ROOT);
+        return detail.startsWith("heartbeat ")
+                || (detail.startsWith("replicated ") && detail.contains(" checkpoint entries to worker "));
     }
 
     // Three successful reads prove liveness, so no extra ping call per worker.

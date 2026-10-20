@@ -42,15 +42,15 @@ final class JobProgressView implements AutoCloseable {
                     int modelRow = t.convertRowIndexToModel(row);
                     JobProgress snapshot = snapshots.get(modelRow);
                     int y = 5;
-                    g.setColor(new Color(220, 233, 255));
+                    g.setColor(new Color(225, 225, 225));
                     g.fillRoundRect(4, y, width, 14, 14, 14);
                     g.setColor(Color.WHITE);
                     g.fillRoundRect(6, y + 2, Math.max(0, width - 4), 10, 10, 10);
                     int percent = value instanceof Number n ? Math.clamp(n.intValue(), 0, 100) : 0;
                     int completed = (int) (Math.max(0, width - 6) * percent / 100.0);
                     g.setPaint(percent == 100
-                            ? new GradientPaint(0, y, new Color(45, 211, 156), 0, y + 14, new Color(16, 177, 119))
-                            : new GradientPaint(0, y, new Color(80, 197, 255), 0, y + 14, ClientStyle.BLUE));
+                            ? new GradientPaint(0, y, new Color(65, 65, 65), 0, y + 14, new Color(25, 25, 25))
+                            : new GradientPaint(0, y, new Color(100, 100, 100), 0, y + 14, ClientStyle.ACCENT));
                     g.fillRoundRect(7, y + 2, completed, 10, 10, 10);
                     g.setColor(ClientStyle.INK);
                     g.drawString(text, width + 10, y + 12);
@@ -64,7 +64,7 @@ final class JobProgressView implements AutoCloseable {
                     g.dispose();
                 }
             };
-            bar.setBackground(selected ? t.getSelectionBackground() : row % 2 == 0 ? Color.WHITE : new Color(242, 247, 255));
+            bar.setBackground(selected ? t.getSelectionBackground() : row % 2 == 0 ? Color.WHITE : new Color(247, 247, 247));
             bar.getAccessibleContext().setAccessibleName("Progress: " + value);
             bar.setToolTipText("Click to see completed work by worker");
             return bar;
@@ -85,7 +85,7 @@ final class JobProgressView implements AutoCloseable {
         };
         details.put(row, model);
         refreshDetails(row);
-        JDialog dialog = new JDialog(SwingUtilities.getWindowAncestor(table), "Worker progress â€” job " + jobs.getValueAt(row, 0));
+        JDialog dialog = new JDialog(SwingUtilities.getWindowAncestor(table), "Worker progress \u2014 job " + jobs.getValueAt(row, 0));
         dialog.add(new JScrollPane(new JTable(model)), BorderLayout.CENTER);
         dialog.add(new JLabel("Updates when a worker finishes its share. Unfinished shares move to their replacement worker."), BorderLayout.SOUTH);
         dialog.setSize(720, 260);

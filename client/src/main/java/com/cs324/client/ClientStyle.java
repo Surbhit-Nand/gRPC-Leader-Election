@@ -8,16 +8,37 @@ import java.awt.geom.Path2D;
 // Static style and painting helper holder for the client; it carries no job logic.
 final class ClientStyle {
     // One palette and one font family, so no component can drift out of theme.
-    static final Color BACKGROUND = new Color(237, 245, 255);
-    static final Color INK = new Color(14, 28, 65);
-    static final Color MUTED = new Color(91, 109, 151);
-    static final Color LINE = new Color(213, 222, 242);
-    static final Color BLUE = new Color(39, 127, 255);
-    static final Color LIGHT_BLUE = new Color(232, 242, 255);
+    static final Color BACKGROUND = new Color(242, 242, 242);
+    static final Color INK = new Color(24, 24, 24);
+    static final Color MUTED = new Color(100, 100, 100);
+    static final Color LINE = new Color(215, 215, 215);
+    static final Color ACCENT = new Color(28, 28, 28);
+    static final Color SURFACE = new Color(235, 235, 235);
     static final Font BODY = new Font("Segoe UI", Font.PLAIN, 14);
 
     // Never instantiated: every widget and constant here is static.
     private ClientStyle() { }
+
+    // Keep standard Swing controls and dialogs in the same monochrome palette.
+    static void installTheme() {
+        javax.swing.plaf.metal.MetalLookAndFeel.setCurrentTheme(
+                new javax.swing.plaf.metal.DefaultMetalTheme() {
+                    private javax.swing.plaf.ColorUIResource shade(Color color) {
+                        return new javax.swing.plaf.ColorUIResource(color);
+                    }
+                    @Override protected javax.swing.plaf.ColorUIResource getPrimary1() { return shade(MUTED); }
+                    @Override protected javax.swing.plaf.ColorUIResource getPrimary2() { return shade(LINE); }
+                    @Override protected javax.swing.plaf.ColorUIResource getPrimary3() { return shade(SURFACE); }
+                    @Override protected javax.swing.plaf.ColorUIResource getSecondary1() { return shade(MUTED); }
+                    @Override protected javax.swing.plaf.ColorUIResource getSecondary2() { return shade(LINE); }
+                    @Override protected javax.swing.plaf.ColorUIResource getSecondary3() { return shade(BACKGROUND); }
+                });
+        try {
+            UIManager.setLookAndFeel(new javax.swing.plaf.metal.MetalLookAndFeel());
+        } catch (UnsupportedLookAndFeelException exception) {
+            throw new IllegalStateException("Could not apply the client theme", exception);
+        }
+    }
 
     // Scrollable card host, so a short window scrolls the cards instead of crushing them.
     static final class Workspace extends JPanel implements Scrollable {
@@ -50,7 +71,7 @@ final class ClientStyle {
                 Graphics2D g = graphics(source);
                 // Stacked translucent fills fake a soft shadow without loading any image.
                 for (int i = 5; i >= 1; i--) {
-                    g.setColor(new Color(66, 94, 155, 3));
+                    g.setColor(new Color(0, 0, 0, 3));
                     g.fillRoundRect(6 - i, 6 - i, getWidth() - 12 + i * 2,
                             getHeight() - 12 + i * 2, 28, 28);
                 }
@@ -64,7 +85,7 @@ final class ClientStyle {
         return panel;
     }
 
-    // Decorative server graphic painted behind the heading, so no asset files are needed.
+    // A quiet chessboard accent in the monochrome palette.
     static JPanel header() {
         JPanel panel = new JPanel(new BorderLayout(20, 0)) {
             @Override
@@ -73,20 +94,17 @@ final class ClientStyle {
                 // Hide decoration on narrow windows so it cannot compete with the text.
                 if (getWidth() < 950) return;
                 Graphics2D g = graphics(source);
-                int x = getWidth() - 225;
-                int y = 55;
-                g.setColor(new Color(230, 237, 254));
-                g.fillOval(x - 30, y + 18, 210, 70);
-                g.fillOval(x + 70, y, 75, 70);
-                g.setColor(new Color(216, 225, 252));
-                g.fillRoundRect(x + 45, y + 5, 85, 25, 9, 9);
-                g.fillRoundRect(x + 45, y + 34, 85, 25, 9, 9);
-                g.setColor(Color.WHITE);
-                g.fillRoundRect(x + 55, y + 15, 19, 3, 3, 3);
-                g.fillRoundRect(x + 55, y + 44, 19, 3, 3, 3);
-                g.setColor(new Color(111, 198, 192));
-                g.fillOval(x + 112, y + 14, 6, 6);
-                g.fillOval(x + 112, y + 43, 6, 6);
+                int x = getWidth() - 186;
+                int y = Math.max(0, (getHeight() - 64) / 2);
+                for (int row = 0; row < 2; row++) {
+                    for (int col = 0; col < 5; col++) {
+                        g.setColor((row + col) % 2 == 0 ? LINE : SURFACE);
+                        g.fillRoundRect(x + col * 32, y + row * 32, 30, 30, 5, 5);
+                    }
+                }
+                icon("pawn", 30, MUTED).paintIcon(this, g, x + 6, y + 25);
+                icon("king", 48, ACCENT).paintIcon(this, g, x + 56, y + 3);
+                icon("pawn", 30, MUTED).paintIcon(this, g, x + 124, y + 25);
                 g.dispose();
             }
         };
@@ -111,7 +129,7 @@ final class ClientStyle {
         public void paintBorder(Component c, Graphics source, int x, int y, int w, int h) {
             Graphics2D g = graphics(source);
             // Focus recolours the outline, so keyboard users can see where they are.
-            g.setColor(c.hasFocus() ? BLUE : LINE);
+            g.setColor(c.hasFocus() ? ACCENT : LINE);
             g.setStroke(dashed
                     ? new BasicStroke(1.2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND, 1, new float[]{4, 4}, 0)
                     : new BasicStroke(1.2f));
@@ -132,7 +150,7 @@ final class ClientStyle {
             if (!getText().isEmpty()) return;
             Graphics2D g = graphics(source);
             g.setFont(getFont());
-            g.setColor(new Color(145, 155, 181));
+            g.setColor(new Color(125, 125, 125));
             Insets padding = getInsets();
             g.drawString(hint, padding.left, padding.top + g.getFontMetrics().getAscent());
             g.dispose();
@@ -141,24 +159,24 @@ final class ClientStyle {
 
     // Painted surface only; Swing still handles clicks, mnemonics and focus for these.
     static JButton button(String text, String symbol, boolean primary) {
-        JButton button = new JButton(text, icon(symbol, 19, primary ? Color.WHITE : BLUE)) {
+        JButton button = new JButton(text, icon(symbol, 19, primary ? Color.WHITE : ACCENT)) {
             @Override
             // Surface first, super afterwards, so the label and icon still render on top.
             protected void paintComponent(Graphics source) {
                 Graphics2D g = graphics(source);
                 boolean pressed = getModel().isPressed();
                 boolean hover = getModel().isRollover();
-                Color top = primary ? new Color(66, 164, 255) : new Color(250, 252, 255);
-                Color bottom = primary ? BLUE : new Color(238, 243, 255);
+                Color top = primary ? new Color(65, 65, 65) : new Color(253, 253, 253);
+                Color bottom = primary ? ACCENT : new Color(240, 240, 240);
                 // Hover and press darken the gradient, so the button reads as interactive.
-                if (pressed || hover) { top = primary ? BLUE.darker() : LIGHT_BLUE; }
+                if (pressed || hover) { top = primary ? ACCENT.darker() : SURFACE; }
                 g.setPaint(new GradientPaint(0, 0, top, 0, getHeight(), bottom));
                 g.fillRoundRect(1, 1, getWidth() - 3, getHeight() - 3, 19, 19);
-                g.setColor(primary ? BLUE : LINE);
+                g.setColor(primary ? ACCENT : LINE);
                 g.drawRoundRect(1, 1, getWidth() - 3, getHeight() - 3, 19, 19);
                 // A second ring marks focus, independent of the platform look and feel.
                 if (hasFocus()) {
-                    g.setColor(primary ? Color.WHITE : BLUE);
+                    g.setColor(primary ? Color.WHITE : ACCENT);
                     g.drawRoundRect(4, 4, getWidth() - 9, getHeight() - 9, 14, 14);
                 }
                 g.dispose();
@@ -171,7 +189,7 @@ final class ClientStyle {
         button.setBorderPainted(false);
         button.setFocusPainted(false);
         button.setFont(BODY.deriveFont(Font.BOLD, 12f));
-        button.setForeground(primary ? Color.WHITE : new Color(54, 76, 141));
+        button.setForeground(primary ? Color.WHITE : new Color(40, 40, 40));
         button.setIconTextGap(10);
         button.setBorder(BorderFactory.createEmptyBorder(6, 12, 6, 12));
         button.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
@@ -193,6 +211,48 @@ final class ClientStyle {
                 g.setStroke(new BasicStroke(1.8f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
                 // An unknown name falls through to the default document glyph.
                 switch (name) {
+                    case "knight" -> {
+                        Path2D p = new Path2D.Double();
+                        p.moveTo(8, 2); p.lineTo(12, 5);
+                        p.curveTo(18, 5, 20, 10, 19, 18);
+                        p.lineTo(19, 19); p.lineTo(6, 19);
+                        p.curveTo(6, 15, 11, 14, 12, 10);
+                        p.lineTo(7, 12); p.lineTo(3, 10);
+                        p.lineTo(7, 5); p.closePath();
+                        // A small cutout forms the eye without depending on background colour.
+                        java.awt.geom.Area piece = new java.awt.geom.Area(p);
+                        piece.subtract(new java.awt.geom.Area(
+                                new java.awt.geom.Ellipse2D.Double(8, 6, 1.6, 1.6)));
+                        g.fill(piece);
+                        g.fillRoundRect(5, 20, 15, 2, 1, 1);
+                    }
+                    case "king" -> {
+                        g.drawLine(12, 2, 12, 7);
+                        g.drawLine(9, 4, 15, 4);
+                        Path2D p = new Path2D.Double();
+                        p.moveTo(6, 8); p.quadTo(9, 6, 12, 9);
+                        p.quadTo(15, 6, 18, 8); p.lineTo(16, 13);
+                        p.lineTo(15, 15); p.lineTo(18, 19);
+                        p.lineTo(6, 19); p.lineTo(9, 15); p.lineTo(8, 13);
+                        p.closePath(); g.fill(p);
+                        g.fillRoundRect(5, 20, 14, 2, 1, 1);
+                    }
+                    case "pawn" -> {
+                        g.fillOval(8, 2, 8, 8);
+                        g.fillRoundRect(7, 10, 10, 3, 2, 2);
+                        Path2D p = new Path2D.Double();
+                        p.moveTo(9, 12); p.quadTo(10, 16, 6, 19);
+                        p.lineTo(18, 19); p.quadTo(14, 16, 15, 12);
+                        p.closePath(); g.fill(p);
+                        g.fillRoundRect(5, 20, 14, 2, 1, 1);
+                    }
+                    case "rook" -> {
+                        g.fillRect(5, 3, 3, 5); g.fillRect(10, 3, 4, 5);
+                        g.fillRect(16, 3, 3, 5);
+                        g.fillRect(5, 7, 14, 3); g.fillRect(8, 9, 8, 9);
+                        g.fillRoundRect(6, 18, 12, 2, 1, 1);
+                        g.fillRoundRect(4, 21, 16, 2, 1, 1);
+                    }
                     case "refresh" -> {
                         g.drawArc(4, 4, 16, 16, 35, 270);
                         g.drawPolyline(new int[]{15, 21, 21}, new int[]{4, 4, 10}, 3);
@@ -255,12 +315,12 @@ final class ClientStyle {
 
     // Section icon inside a tinted circle, matching the heading design.
     static JLabel badge(String symbol) {
-        JLabel badge = new JLabel(icon(symbol, 20, BLUE), SwingConstants.CENTER) {
+        JLabel badge = new JLabel(icon(symbol, 20, ACCENT), SwingConstants.CENTER) {
             @Override
             // Tinted disc painted before the label, so the glyph sits inside a badge.
             protected void paintComponent(Graphics source) {
                 Graphics2D g = graphics(source);
-                g.setColor(LIGHT_BLUE); g.fillOval(0, 0, 36, 36); g.dispose();
+                g.setColor(SURFACE); g.fillOval(0, 0, 36, 36); g.dispose();
                 super.paintComponent(source);
             }
         };
@@ -274,7 +334,7 @@ final class ClientStyle {
             @Override public Component getTableCellRendererComponent(JTable t, Object value,
                     boolean selected, boolean focus, int row, int column) {
                 super.getTableCellRendererComponent(t, value, selected, focus, row, column);
-                setBackground(LIGHT_BLUE);
+                setBackground(SURFACE);
                 setForeground(MUTED);
                 setFont(BODY.deriveFont(Font.BOLD, 10f));
                 setBorder(BorderFactory.createEmptyBorder(0, 10, 0, 10));
@@ -287,7 +347,7 @@ final class ClientStyle {
     static void installDetailsAction(JTable table, int column, java.util.function.IntConsumer action) {
         table.getColumnModel().getColumn(column).setCellRenderer((t, value, selected, focus, row, col) -> {
             JPanel cell = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 3));
-            cell.setBackground(selected ? t.getSelectionBackground() : row % 2 == 0 ? Color.WHITE : new Color(248, 250, 255));
+            cell.setBackground(selected ? t.getSelectionBackground() : row % 2 == 0 ? Color.WHITE : new Color(248, 248, 248));
             JButton view = button("View", "eye", false);
             view.setFont(BODY.deriveFont(11f));
             view.setBorder(BorderFactory.createEmptyBorder(3, 7, 3, 7));
@@ -320,12 +380,13 @@ final class ClientStyle {
                 boolean selected, boolean focus, int row, int column) {
             super.getTableCellRendererComponent(table, value, selected, focus, row, column);
             String text = value == null ? "" : value.toString();
-            tint = text.equals("PRIMESUM") || text.equals("PRIMECOUNT") ? new Color(232, 223, 255)
-                    : text.equals("Coordinator") ? new Color(255, 237, 185)
-                    : text.equals("Unreachable") ? new Color(255, 225, 230) : new Color(222, 237, 255);
+            tint = text.equals("Coordinator") ? INK : SURFACE;
             setFont(BODY.deriveFont(Font.BOLD, 10f));
-            setForeground(INK);
-            setBackground(selected ? table.getSelectionBackground() : row % 2 == 0 ? Color.WHITE : new Color(248, 250, 255));
+            setIcon(text.equals("Coordinator") ? icon("king", 17, Color.WHITE)
+                    : text.equals("Worker") || text.equals("Unreachable") ? icon("pawn", 17, INK) : null);
+            setIconTextGap(5);
+            setForeground(text.equals("Coordinator") ? Color.WHITE : INK);
+            setBackground(selected ? table.getSelectionBackground() : row % 2 == 0 ? Color.WHITE : new Color(248, 248, 248));
             setBorder(BorderFactory.createEmptyBorder(0, 12, 0, 4));
             setToolTipText(text);
             return this;
@@ -336,7 +397,8 @@ final class ClientStyle {
             g.setFont(getFont());
             g.setColor(tint);
             g.fillRoundRect(7, (getHeight() - 19) / 2,
-                    Math.min(getWidth() - 10, g.getFontMetrics().stringWidth(getText()) + 12), 19, 7, 7);
+                    Math.min(getWidth() - 10, g.getFontMetrics().stringWidth(getText()) + 12
+                            + (getIcon() == null ? 0 : getIcon().getIconWidth() + getIconTextGap())), 19, 7, 7);
             g.dispose();
             setOpaque(false);
             super.paintComponent(source);
@@ -352,11 +414,9 @@ final class ClientStyle {
         @Override public Component getTableCellRendererComponent(JTable table, Object value,
                 boolean selected, boolean focus, int row, int column) {
             text = value == null ? "" : value.toString();
-            boolean success = text.equals("Completed") || text.equals("Alive");
-            boolean failed = text.equals("Failed") || text.equals("Unreachable");
-            foreground = success ? new Color(9, 145, 78) : failed ? new Color(200, 25, 75) : BLUE;
-            fill = success ? new Color(222, 248, 234) : failed ? new Color(255, 228, 237) : LIGHT_BLUE;
-            setBackground(selected ? table.getSelectionBackground() : row % 2 == 0 ? Color.WHITE : new Color(242, 247, 255));
+            foreground = INK;
+            fill = SURFACE;
+            setBackground(selected ? table.getSelectionBackground() : row % 2 == 0 ? Color.WHITE : new Color(247, 247, 247));
             setToolTipText(text);
             getAccessibleContext().setAccessibleName(text);
             return this;

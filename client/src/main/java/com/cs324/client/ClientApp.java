@@ -89,7 +89,7 @@ public class ClientApp extends JFrame {
     private final JPanel historyContent = new JPanel(historyLayout);
 
     // Cluster-activity view: worker snapshot table plus a feed of derived happenings.
-    // Polling only â€” workers expose no extra state, events come from snapshot diffs.
+    // Polling only \u2014 workers expose no extra state, events come from snapshot diffs.
     private final DefaultTableModel clusterModel = new DefaultTableModel(
             new String[]{"Worker", "Role", "Coordinator view", "Neighbours", "JAC", "Status", "Actions"},
             0
@@ -132,12 +132,12 @@ public class ClientApp extends JFrame {
         setContentPane(root);
 
         // Preserve the workspace heading and content with the refreshed palette.
-        JPanel header = transparentPanel(new BorderLayout());
+        JPanel header = ClientStyle.header();
         header.setBorder(BorderFactory.createEmptyBorder(0, 10, 2, 10));
         JPanel heading = transparentPanel(null);
         heading.setLayout(new BoxLayout(heading, BoxLayout.Y_AXIS));
         JLabel breadcrumb = label("CS324   /   Distributed computing", 13, Font.PLAIN, MUTED);
-        breadcrumb.setIcon(icon("network", 20, BLUE));
+        breadcrumb.setIcon(icon("king", 20, ACCENT));
         breadcrumb.setIconTextGap(10);
         heading.add(breadcrumb);
         heading.add(Box.createVerticalStrut(4));
@@ -150,7 +150,7 @@ public class ClientApp extends JFrame {
         // Rounded cards group the form and submitted job history.
         JPanel workspace = new Workspace();
         JPanel composer = card(new BorderLayout(0, 10));
-        composer.add(sectionHeading("New job", "Choose an operation and provide input data.", "document"),
+        composer.add(sectionHeading("New job", "Choose an operation and provide input data.", "rook"),
                 BorderLayout.NORTH);
 
         // Operation selection determines the example text and validation rules.
@@ -180,7 +180,7 @@ public class ClientApp extends JFrame {
             public Component getListCellRendererComponent(JList<?> list, Object value,
                     int index, boolean selected, boolean focused) {
                 super.getListCellRendererComponent(list, value, index, selected, focused);
-                setBackground(selected ? LIGHT_BLUE : Color.WHITE);
+                setBackground(selected ? SURFACE : Color.WHITE);
                 setForeground(INK);
                 setBorder(BorderFactory.createEmptyBorder(5, 8, 5, 8));
                 return this;
@@ -202,8 +202,8 @@ public class ClientApp extends JFrame {
         inputArea.setFont(BODY);
         inputArea.setForeground(INK);
         inputArea.setBackground(Color.WHITE);
-        inputArea.setCaretColor(BLUE);
-        inputArea.setSelectionColor(BLUE);
+        inputArea.setCaretColor(ACCENT);
+        inputArea.setSelectionColor(ACCENT);
         inputArea.setSelectedTextColor(Color.WHITE);
         inputArea.setMargin(new Insets(5, 5, 5, 5));
         inputArea.getAccessibleContext().setAccessibleName("Job input data");
@@ -272,7 +272,7 @@ public class ClientApp extends JFrame {
         jobTable.setShowVerticalLines(false);
         jobTable.setGridColor(LINE);
         jobTable.setIntercellSpacing(new Dimension(0, 1));
-        jobTable.setSelectionBackground(LIGHT_BLUE);
+        jobTable.setSelectionBackground(SURFACE);
         jobTable.setSelectionForeground(INK);
         jobTable.getTableHeader().setReorderingAllowed(false);
         jobTable.getTableHeader().setPreferredSize(new Dimension(0, 30));
@@ -285,7 +285,7 @@ public class ClientApp extends JFrame {
                 super.getTableCellRendererComponent(table, value, selected, focused, row, column);
                 setBorder(BorderFactory.createEmptyBorder(0, 10, 0, 10));
                 if (!selected) {
-                    setBackground(row % 2 == 0 ? Color.WHITE : new Color(248, 250, 255));
+                    setBackground(row % 2 == 0 ? Color.WHITE : new Color(248, 248, 248));
                     setForeground(INK);
                 }
                 setToolTipText(value == null ? null : value.toString());
@@ -298,7 +298,7 @@ public class ClientApp extends JFrame {
             public Component getTableCellRendererComponent(JTable table, Object value,
                     boolean selected, boolean focused, int row, int column) {
                 super.getTableCellRendererComponent(table, value, selected, focused, row, column);
-                setBackground(new Color(245, 248, 255));
+                setBackground(new Color(245, 245, 245));
                 setForeground(MUTED);
                 setFont(BODY.deriveFont(Font.BOLD, 12f));
                 setBorder(BorderFactory.createCompoundBorder(
@@ -337,7 +337,7 @@ public class ClientApp extends JFrame {
         emptyState.setBorder(new RoundBorder(true));
         JPanel emptyText = transparentPanel(null);
         emptyText.setLayout(new BoxLayout(emptyText, BoxLayout.Y_AXIS));
-        JLabel emptyIcon = new JLabel(icon("document", 36, new Color(150, 164, 192)));
+        JLabel emptyIcon = new JLabel(icon("document", 36, new Color(150, 150, 150)));
         JLabel emptyTitle = label("Your jobs and results will appear here", 16, Font.BOLD, INK);
         JLabel emptyHint = label("Choose an operation, add data, then submit your job.", 13, Font.PLAIN, MUTED);
         emptyTitle.setHorizontalAlignment(SwingConstants.CENTER);
@@ -371,7 +371,7 @@ public class ClientApp extends JFrame {
         statusLabel.setText("Ready to prepare a job.");
         statusLabel.setFont(BODY.deriveFont(12f));
         statusLabel.setForeground(MUTED);
-        statusLabel.setIcon(icon("dot", 18, new Color(31, 178, 141)));
+        statusLabel.setIcon(icon("dot", 18, new Color(55, 55, 55)));
         statusLabel.setIconTextGap(8);
         JPanel footer = transparentPanel(new BorderLayout(16, 0));
         footer.add(statusLabel, BorderLayout.CENTER);
@@ -408,7 +408,7 @@ public class ClientApp extends JFrame {
         JPanel cluster = card(new BorderLayout(0, 8));
         JPanel heading = transparentPanel(new BorderLayout());
         heading.add(sectionHeading("Cluster activity",
-                "Live workers and what is happening between them.", "eye"), BorderLayout.CENTER);
+                "King: coordinator. Pawns: workers. Live cluster activity.", "knight"), BorderLayout.CENTER);
         JButton refreshButton = button("Refresh", "refresh", false);
         refreshButton.setMnemonic('R');
         refreshButton.setToolTipText("Poll the cluster now instead of waiting for the next update.");
@@ -423,7 +423,7 @@ public class ClientApp extends JFrame {
         clusterTable.setShowVerticalLines(false);
         clusterTable.setGridColor(LINE);
         clusterTable.setIntercellSpacing(new Dimension(0, 1));
-        clusterTable.setSelectionBackground(LIGHT_BLUE);
+        clusterTable.setSelectionBackground(SURFACE);
         clusterTable.setSelectionForeground(INK);
         clusterTable.getTableHeader().setReorderingAllowed(false);
         clusterTable.setDefaultRenderer(Object.class, new DefaultTableCellRenderer() {
@@ -432,8 +432,16 @@ public class ClientApp extends JFrame {
                     boolean selected, boolean focused, int row, int column) {
                 super.getTableCellRendererComponent(table, value, selected, focused, row, column);
                 setBorder(BorderFactory.createEmptyBorder(0, 10, 0, 10));
+                int modelColumn = table.convertColumnIndexToModel(column);
+                int modelRow = table.convertRowIndexToModel(row);
+                String role = String.valueOf(table.getModel().getValueAt(modelRow, 1));
+                setIcon(modelColumn == 0
+                        ? icon(role.equals("Coordinator") ? "king" : "pawn", 18,
+                                role.equals("Unreachable") ? MUTED : ACCENT)
+                        : null);
+                setIconTextGap(6);
                 if (!selected) {
-                    setBackground(row % 2 == 0 ? Color.WHITE : new Color(248, 250, 255));
+                    setBackground(row % 2 == 0 ? Color.WHITE : new Color(248, 248, 248));
                     setForeground(INK);
                 }
                 setToolTipText(value == null ? null : value.toString());
@@ -451,7 +459,7 @@ public class ClientApp extends JFrame {
             }
             JOptionPane.showMessageDialog(this, details.toString(), "Worker details", JOptionPane.INFORMATION_MESSAGE);
         });
-        int[] widths = {70, 95, 105, 80, 40, 110, 80};
+        int[] widths = {95, 120, 125, 80, 40, 110, 80};
         for (int i = 0; i < widths.length; i++) {
             clusterTable.getColumnModel().getColumn(i).setPreferredWidth(widths[i]);
         }
@@ -476,13 +484,13 @@ public class ClientApp extends JFrame {
         JPanel clusterFooter = transparentPanel(new BorderLayout(16, 0));
         clusterStatusLabel.setFont(BODY.deriveFont(12f));
         clusterStatusLabel.setForeground(MUTED);
-        clusterStatusLabel.setIcon(icon("dot", 18, new Color(31, 178, 141)));
+        clusterStatusLabel.setIcon(icon("dot", 18, new Color(55, 55, 55)));
         clusterStatusLabel.setIconTextGap(8);
         clusterFooter.add(clusterStatusLabel, BorderLayout.CENTER);
 
         JPanel log = card(new BorderLayout(0, 8));
         JPanel logHeader = new JPanel(new BorderLayout());
-        logHeader.setBackground(LIGHT_BLUE);
+        logHeader.setBackground(SURFACE);
         logHeader.setBorder(BorderFactory.createEmptyBorder(4, 10, 4, 8));
         JLabel logTitle = label("System log", 12, Font.BOLD, INK);
         logTitle.setIcon(icon("list", 15, MUTED));
@@ -492,7 +500,7 @@ public class ClientApp extends JFrame {
         autoScroll.setForeground(MUTED);
         JPanel logControls = transparentPanel(new FlowLayout(FlowLayout.RIGHT, 12, 0));
         for (SystemLogPane.Level level : SystemLogPane.Level.values()) {
-            JLabel key = new JLabel("â— " + switch(level) {
+            JLabel key = new JLabel("\u25cf " + switch(level) {
                 case SUCCESS -> "Success"; case INFO -> "Info";
                 case WARNING -> "Recovery / election"; case ERROR -> "Failure";
             });
@@ -556,7 +564,7 @@ public class ClientApp extends JFrame {
                 SwingUtilities.invokeLater(() -> renderClusterSnapshot(result.snapshot(), all));
             } catch (Exception e) {
                 SwingUtilities.invokeLater(() ->
-                        clusterStatusLabel.setText("Cluster unreachable â€” retrying..."));
+                        clusterStatusLabel.setText("Cluster unreachable \u2014 retrying..."));
             } finally {
                 clusterPollInFlight.set(false);
             }
@@ -584,7 +592,7 @@ public class ClientApp extends JFrame {
         String coordinator = snapshot.consensusCoordinator() == -1
                 ? "no coordinator yet" : "coordinator Worker " + snapshot.consensusCoordinator();
         clusterStatusLabel.setText("Updated " + clock.format(LocalTime.now())
-                + " Â· " + workers + (workers == 1 ? " worker" : " workers") + " Â· " + coordinator);
+                + " \u00b7 " + workers + (workers == 1 ? " worker" : " workers") + " \u00b7 " + coordinator);
     }
 
     private static String formatNeighbourIds(Set<Integer> ids) {
@@ -674,9 +682,9 @@ public class ClientApp extends JFrame {
             inputArea.setText(CsvInputLoader.toCsv(values));
             statusLabel.setText(files.length == 1
                     ? "Loaded " + files[0].getName() + " (" + values.length
-                            + " values) â€” not submitted"
+                            + " values) \u2014 not submitted"
                     : "Loaded " + files.length + " files (" + values.length
-                            + " values) â€” not submitted");
+                            + " values) \u2014 not submitted");
         } catch (IOException exception) {
             // The loader already names the file it could not read.
             showError(exception.getMessage());
@@ -801,7 +809,7 @@ public class ClientApp extends JFrame {
                     this, rangeWarning, "Large range",
                     JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
             if (answer != JOptionPane.YES_OPTION) {
-                statusLabel.setText("Submission cancelled â€” input kept.");
+                statusLabel.setText("Submission cancelled \u2014 input kept.");
                 return;
             }
         }
@@ -994,7 +1002,10 @@ public class ClientApp extends JFrame {
         final String host = bootstrapHost;
         final int cPort = clientPort;
         SwingUtilities.invokeLater(
-                () -> new ClientApp(host, cPort, grpcPort).setVisible(true)
+                () -> {
+                    ClientStyle.installTheme();
+                    new ClientApp(host, cPort, grpcPort).setVisible(true);
+                }
         );
     }
 }
