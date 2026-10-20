@@ -1,0 +1,102 @@
+// Job-distribution contract: submission, assignments, results and client callbacks.
+// Field numbers are FROZEN once merged. Splitting, aggregation, term budget,
+// retries, and unfinished-task recovery stay with Member 3; this file only
+// fixes payload encoding and endpoints.
+//
+// Payload encoding:
+// - PrimeRange{start, end} travels as a message for PRIMESUM/PRIMECOUNT ranges;
+//   lists travel as repeated int32 (32-bit values only, matching today's ints).
+// - No bytes blobs: every payload stays inspectable in logs and tests.
+// - Results are a oneof: MAX/PRIMECOUNT answer int32, PRIMESUM answers int64,
+//   failures travel as error text (matches today's "Error ..." strings).
+// - Client callback: the coordinator delivers via ClientService.DeliverResult
+//   to the gRPC endpoint the client published at submission time.
+syntax = "proto3";
+package distrilab;
+option java_package = "com.cs324.job.proto";
+option java_multiple_files = true;
+
+service JobService {
+  // Coordinator entry point: split and dispatch. Acceptance only; the final
+  // answer arrives via ClientService.DeliverResult.
+  rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse);
+  // One slice handed to one worker; fire-and-return like assignTask.
+  rpc AssignTask(TaskAssignment) returns (TaskAck);
+  // One slice answer reported back; matches reportTaskResult(jobId, workerId).
+  rpc ReportTaskResult(TaskResult) returns (TaskResultAck);
+}
+
+// Client-side callback endpoint, hosted by each client process.
+service ClientService {
+  rpc DeliverResult(TaskResult) returns (DeliverResultAck);
+}
+
+message PrimeRangePayload {
+  int32 start = 1;
+  int32 end = 2;
+}
+
+message IntList {
+  repeated int32 values = 1;
+}
+
+message TaskPayload {
+  oneof content {
+    PrimeRangePayload prime_range = 1;
+    IntList int_list = 2;
+  }
+}
+
+// Where a client receives its answer: host/port of the client's callback
+// server. The name field is retained as optional metadata.
+message ClientEndpoint {
+  string host = 1;
+  int32 port = 2;
+  string name = 3;
+}
+
+// Where a slice answer must be reported while leadership may be moving
+// (the coordinator's current gRPC listener).
+message CoordinatorEndpoint {
+  int32 worker_id = 1;
+  string host = 2;
+  int32 port = 3;
+}
+
+message SubmitJobRequest {
+  int32 job_id = 1;
+  string job_type = 2;
+  TaskPayload payload = 3;
+  ClientEndpoint client = 4;
+}
+
+message SubmitJobResponse {}
+
+message TaskAssignment {
+  int32 job_id = 1;
+  string job_type = 2;
+  TaskPayload payload = 3;
+  CoordinatorEndpoint coordinator = 4;
+  // Stable slice identity within a job; retries keep this ID.
+  int32 task_id = 5;
+  // Incremented on reassignment; echoed in TaskResult to fence stale owners.
+  int32 attempt = 6;
+}
+
+message TaskAck {}
+
+message TaskResult {
+  int32 job_id = 1;
+  int32 worker_id = 2;
+  int32 task_id = 6;
+  int32 attempt = 7;
+  oneof result {
+    int32 int_result = 3;
+    int64 long_result = 4;
+    string error = 5;
+  }
+}
+
+message TaskResultAck {}
+
+message DeliverResultAck {}

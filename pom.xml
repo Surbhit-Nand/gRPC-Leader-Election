@@ -2,9 +2,16 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
     <groupId>CS324</groupId>
-    <artifactId>A1_CS324</artifactId>
+    <artifactId>grpc-leader-election</artifactId>
     <version>1.0-SNAPSHOT</version>
-    <packaging>jar</packaging>
+    <packaging>pom</packaging>
+    <modules>
+        <module>shared</module>
+        <module>bootstrap</module>
+        <module>worker</module>
+        <module>client</module>
+        <module>integration-tests</module>
+    </modules>
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>25</maven.compiler.release>
@@ -23,6 +30,7 @@
         </dependency>
     </dependencies>
     <build>
+        <pluginManagement>
         <plugins>
             <!--
                 os-maven-plugin runs as a lifecycle plugin, not a build <extension>.
@@ -90,15 +98,24 @@
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.11.0</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.5</version>
+                <configuration>
+                    <failIfNoTests>false</failIfNoTests>
+                    <failIfNoSpecifiedTests>false</failIfNoSpecifiedTests>
+                </configuration>
             </plugin>
         </plugins>
+        </pluginManagement>
     </build>
     <!--
-        Convenience profiles: each one only sets the default main class and the
-        plain program arguments for that node. They are intentionally free of any
-        "%classpath" template so they behave the same for exec:java and exec:exec.
+        Convenience profiles: each one only sets the default main class for that
+        node. With no arguments the CLIs use localhost and gRPC port 50051.
         A command line -Dexec.mainClass / -Dexec.args always overrides a profile.
     -->
     <profiles>
@@ -112,14 +129,12 @@
             <id>bootstrap</id>
             <properties>
                 <exec.mainClass>com.cs324.bootstrap.BootstrapNode</exec.mainClass>
-                <exec.args>1099</exec.args>
             </properties>
         </profile>
         <profile>
             <id>worker</id>
             <properties>
                 <exec.mainClass>com.cs324.worker.WorkerNode</exec.mainClass>
-                <exec.args>localhost 1099</exec.args>
             </properties>
         </profile>
     </profiles>

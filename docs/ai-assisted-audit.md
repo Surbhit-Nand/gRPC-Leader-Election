@@ -1,7 +1,11 @@
 # AI-assisted audit and regression fixes
 
+> Historical record from 18â€“19 October 2026. See the
+> [20 October migration record](grpc-module-migration.md) for the current
+> gRPC-only modules and stricter job acceptance policy.
+
 This audit and the associated fixes/tests were produced with OpenAI Codex assistance
-at the repository owner's request on 18–19 October 2026 (Pacific/Fiji). The owner
+at the repository owner's request on 18â€“19 October 2026 (Pacific/Fiji). The owner
 should review the diffs and use this record in the assignment's AI-use disclosure;
 it is not a claim that these changes were independently written by a student.
 Existing authorship and history are preserved. No commits are pushed automatically.
@@ -63,10 +67,9 @@ local directory interface to gRPC. Bootstrap gRPC registration makes no peer
 network calls under its registration lock; joiners probe published endpoints with
 deadlines. WorkerNode publishes its listener, refreshes membership, joins via gRPC
 and adopts the peer's leadership term. The executable bootstrap and workers no
-longer export RMI objects. Old constructors and RmiElectionTransport remain for
-legacy regression fixtures, and are not selected by the application entry points.
-Legacy positional contact ports remain accepted but unused; `--grpc-port` and the
-documented bootstrap/client gRPC port arguments select the actual endpoints.
+longer export RMI objects. The later 20 October migration removed the legacy
+RmiElectionTransport and contact-port CLI positions, renamed the production
+local APIs, and retained only deprecated name aliases.
 
 Verification includes actual worker JVMs, a bootstrap with no exported RMI object,
 dynamic joins, gRPC monitoring, a forcibly terminated coordinator, correct recovered

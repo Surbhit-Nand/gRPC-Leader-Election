@@ -1,505 +1,240 @@
-# CS324 Assignment 2 (2026) - Distributed Worker Cluster
+# CS324 Assignment 2 (2026): Distributed Worker Cluster
 
-The system supports MAX, PRIMESUM and PRIMECOUNT with gRPC job submission,
-distribution, results, streamed progress, **worker failure recovery**, a
-**gRPC leader election** and **coordinator failover**.
-See [Worker failure recovery](#worker-failure-recovery) below and
-[Job distribution](docs/job-distribution.md) for integration and demo instructions.
-All deployed component communication uses Protocol Buffers and gRPC, including peer joining, topology repair and client monitoring. Historical RMI interfaces and fixtures remain only for compatibility tests; the executable bootstrap and workers do not export RMI objects. See [AI-assisted audit and disclosure](docs/ai-assisted-audit.md).
+A Java cluster for MAX, PRIMESUM and PRIMECOUNT. Discovery, peer connections,
+elections, assignments, results, monitoring, progress streaming and checkpoint
+replication all use Protocol Buffers and gRPC. There is no RMI implementation,
+registry, object export or fallback in the applications.
 
-Two features from the election member:
+## Projects
 
-- **Leader election runs over gRPC** (`ElectionService`). See
-  [docs/election.md](docs/election.md) and the
-  [election and failover demo](#election-and-failover-demo-member-2).
-- **Coordinator failover**: if the coordinator dies, the survivors detect it,
-  elect a replacement and finish the jobs it was holding. See
-  [docs/failover.md](docs/failover.md).
+The root Maven POM aggregates five separate Maven projects:
+
+| Directory | Artifact | Responsibility |
+| --- | --- | --- |
+| `shared` | `cluster-shared` | Protobuf contracts, generated clients, local data interfaces, arithmetic and splitting helpers |
+| `bootstrap` | `cluster-bootstrap` | Worker discovery and cluster-wide ID allocation |
+| `worker` | `cluster-worker` | Election, computation, streamed progress and failover |
+| `client` | `cluster-client` | Swing GUI, job submission, callbacks and monitoring |
+| `integration-tests` | `cluster-integration-tests` | Unit and cross-application regression tests |
+
+Each application has its own POM, sources, compiled classes, JAR and runtime
+classpath. Bootstrap, worker and client depend on `cluster-shared`; they do not
+depend on each other's implementation. Tests depend on all three applications.
+Production code uses `WorkerControl`, `ClusterDirectory` and `WorkerRuntime`.
+Deprecated `WorkerRemoteImpl` and `BootstrapRemote` aliases remain for source
+compatibility; both are plain local Java types and do not use `java.rmi`.
 
 ## Prerequisites
 
-- **JDK 25 (or newer)** — the project targets Java 25 (latest LTS). You must have JDK 25+ installed or the build will fail with a "release version not supported" error.
-  - Check your version: `java -version`
-  - If you have an older JDK, install JDK 25 (e.g. from [Adoptium](https://adoptium.net/)) and make sure it is selected in your IDE / `JAVA_HOME`.
-- **Maven 3.9+** — used to build and run the project.
+- JDK 25 or newer. Check both `java -version` and the Java version in `mvn -version`.
+- Maven 3.9 or newer.
+- A graphical desktop for the Swing client. Tests run without opening the GUI.
 
-## First-Time Setup
+Use the same JDK in `JAVA_HOME`, Maven and your IDE.
 
-Clone the repo:
+## First-time setup
 
-```
+```text
 git clone https://github.com/Surbhit-Nand/gRPC-Leader-Election.git
-```
-
-Move into the project folder:
-
-```
 cd gRPC-Leader-Election
+mvn package dependency:copy-dependencies -DincludeScope=runtime
 ```
 
-Build the project:
+This runs the tests, generates protobuf/gRPC sources in `shared/target`, and
+packages the projects. Each application's dependencies go into its own
+`target/dependency` directory. The first build needs access to Maven Central.
 
-```
-mvn compile dependency:copy-dependencies -DincludeScope=runtime
-```
+To compile and package without running tests:
 
-To run the Bootstrap Node, the Workers and the Client, see [How to Run](#how-to-run-any-ide-or-terminal) below.
-
----
-
-## How to Run (any IDE or terminal)
-
-The project uses gRPC runtime dependencies. The build command above copies them to `target/dependency`. The quickest way to run anything below is the helper script (one terminal per node, project root) — it carries the right classpath automatically:
-
-```
-.\run.ps1 build                  # compile + fetch the jars (run once first)
-.\run.ps1 bootstrap              # Bootstrap Node (start first, one only)
-.\run.ps1 worker                  # Worker Node (repeat per terminal)
-.\run.ps1 client                  # Client GUI (repeat per terminal, see ports below)
+```text
+mvn package -DskipTests dependency:copy-dependencies -DincludeScope=runtime
 ```
 
-The equivalent manual `java` commands follow for any IDE or terminal; they behave the same in VS Code, IntelliJ, Eclipse and a plain terminal; Apache NetBeans needs extra setup for the worker, see [Apache NetBeans](#apache-netbeans). The commands below use the Windows classpath separator (`;`); use `:` on Linux/macOS. Every node is a separate process, so start each one in its own terminal.
+The equivalent Windows shortcut is `.\run.ps1 build`. It skips execution of tests;
+use `mvn verify` to run the complete suite.
 
-**All nodes run on the same machine** (`localhost`), one terminal each.
+## Run a cluster
 
-Bootstrap Node (start first, one only). The optional second argument is the
-gRPC registry port (default `50051`). The first argument is an unused legacy placeholder, retained so existing launch files still work; no RMI listener is created:
+Open a separate terminal for each process, starting in the repository root.
+Use **at least two workers**: new jobs require a checkpoint acknowledgement from
+another worker. Use three or four workers for failure demonstrations.
 
-```
-java -cp "target/classes;target/dependency/*" com.cs324.bootstrap.BootstrapNode 1099
-```
+1. Start bootstrap:
 
-Worker Node (one per terminal, no id/port typing). Bootstrap auto-assigns a monotonic
-worker id and each worker binds an available gRPC port automatically:
-
-```
-java -cp "target/classes;target/dependency/*" com.cs324.worker.WorkerNode localhost 1099
-java -cp "target/classes;target/dependency/*" com.cs324.worker.WorkerNode localhost 1099
-```
-
-gRPC is always enabled. `--grpc` is accepted for compatibility. Use `--grpc-port N` to select a nondefault bootstrap gRPC port; the old positional bootstrap contact port is unused. All discovery, peer links, elections, heartbeats, monitoring, assignments and callbacks use gRPC.
-
-Each run prints the assigned id and bound gRPC port.
-Ids are never reused within one Bootstrap run (a middle id left by a departed worker stays
-empty); restarting Bootstrap resets the sequence to 1. Restart all workers together for a fresh run.
-
-**The cluster elects a coordinator by itself** about 3 seconds after the workers start, so there is nothing to trigger by hand. A worker that already knows a coordinator stays quiet. To force a fresh election at any time, press `[1]` in a worker's terminal.
-
-Client (Swing GUI). Every client process needs **its own callback port** for receiving results, so start one client per terminal and give each a different port — `1199`, `1200`, `1201`, ... Launching the same port twice on one machine makes the second client fail to bind:
-
-```
-java -cp "target/classes;target/dependency/*" com.cs324.client.ClientApp localhost 1099 1199
-java -cp "target/classes;target/dependency/*" com.cs324.client.ClientApp localhost 1099 1200
-```
-
-The arguments are `bootstrapHost legacyUnusedPort clientCallbackPort bootstrapGrpcPort`; all are optional and default to `localhost 1099 1199 50051`.
-
-> The `java` commands above and `.\run.ps1 bootstrap|worker|client` are interchangeable — the script just fills in the defaults shown here. A bare `java -cp target/classes ...` (without `target/dependency/*`) will fail with `NoClassDefFoundError: io/grpc/...` because the gRPC jars live in `target/dependency`.
-
-### VS Code
-
-Press **F5** (Run and Debug) and pick a configuration from `.vscode/launch.json`:
-
-| Configuration | Main class | Arguments |
-| --- | --- | --- |
-| `Bootstrap Node (gRPC port 50051)` | `com.cs324.bootstrap.BootstrapNode` | `1099` |
-| `Worker (auto id+port)` | `com.cs324.worker.WorkerNode` | `localhost 1099` |
-| `Client App (callback port 1199)` | `com.cs324.client.ClientApp` | `localhost 1099 1199` |
-| `Client App 2 (callback port 1200)` | `com.cs324.client.ClientApp` | `localhost 1099 1200` |
-
-Every configuration names an explicit main class, so the IDE never has to guess it. The two client configurations use different callback ports, which is what lets you run two clients at once.
-
-### Apache NetBeans
-
-NetBeans has no `nbactions.xml` in this repository, so the two shortcuts are **not** equivalent to the other IDEs:
-
-- **Shift+F6** (*Run File*) infers the main class from the file you have open, and passes no arguments. That is fine for `BootstrapNode`, `ClientApp` and now `WorkerNode` too, which all fall back to the correct defaults (`WorkerNode` auto-assigns id + port from 3500 and uses `localhost 1099`).
-- **F6** (*Run Project*) always runs the pom's default main class, `com.cs324.client.ClientApp`, with an empty `exec.args` - so it starts a client rather than whichever node you were editing.
-- To start a worker, set the arguments explicitly under *Project Properties -> Run*, or better create one run configuration per node via *Run -> Set Main Class -> Customize...*:
-
-  | Main class | Arguments |
-  | --- | --- |
-  | `com.cs324.bootstrap.BootstrapNode` | `1099` |
-  | `com.cs324.worker.WorkerNode` | `localhost 1099` |
-  | `com.cs324.client.ClientApp` | `localhost 1099 1199` |
-
-  Start one worker per run configuration; each auto-assigns its own id and port. Use a different callback port for a second client.
-- Register a **JDK 25 or newer** under *Tools -> Java Platforms*, because the pom targets `release 25`.
-- Once a run configuration is verified on one machine, NetBeans can export it to `nbactions.xml` in the project root so the whole team shares the same setup. This repository does not track one yet, so treat the table above as the source of truth.
-
-### Command line with Maven (optional)
-
-The `client`, `bootstrap` and `worker` profiles only set the default `exec.mainClass` / `exec.args`, so the short form is enough for a quick look at a node:
-
-```
-mvn -Pclient exec:java
-mvn -Pbootstrap exec:java
-mvn -Pworker exec:java
-```
-
-For anything that has to keep running, fork a JVM with `exec:exec` (`%classpath` is replaced by Maven with the project classpath):
-
-```
-mvn exec:exec -Dexec.executable=java -Dexec.args="-classpath %classpath com.cs324.bootstrap.BootstrapNode 1099"
-```
-
-**Why fork:** use a separate JVM for each component so process lifetime and crash demonstrations are explicit. Bootstrap now waits for its gRPC server; it no longer relies on RMI threads to keep running.
-
-### Troubleshooting
-
-- `Error: Could not find or load main class ${packageClassName}` - the IDE ran NetBeans' default Maven "run" action without substituting `${packageClassName}` (this is what the Oracle Java extension for VS Code did). That placeholder is filled in by the IDE, never by Maven, so it must not reach the command line. Use one of the recipes above instead.
-- `release version 25 not supported` - the IDE or Maven is running on a JDK older than 25. Point it at JDK 25+.
-- A second client exits immediately, or the first one stops receiving results - the two are sharing a callback port. Give each client its own port (see [How to Run](#how-to-run-any-ide-or-terminal)).
-- `Address already in use` on bootstrap or the client: stop the process using that gRPC port or choose another port. Workers bind ephemeral gRPC ports.
-- `NoClassDefFoundError: io/grpc/...` at startup - the node was launched with bare `target/classes`. Every node needs the dependency jars: use `.\run.ps1 <node>` or `java -cp "target/classes;target/dependency/*" ...` after `mvn compile dependency:copy-dependencies`.
-
----
-
-## Running the Tests
-
-```
-mvn test
-```
-
-The JUnit 5 suite covers the election protocol over gRPC and over the RMI fallback, duplicate-message handling, job splitting and aggregation, client callbacks, coordinator rotation, thread safety, auto-assigned worker ids, partition-healing rewire, the cluster-activity monitor, range warnings, gRPC contract shapes, Bootstrap discovery over gRPC, job progress streaming, worker failure recovery, stale-result protection, concurrent-job recovery, colored system-log rendering, coordinator-failure detection, and coordinator failover with job recovery.
-
-`mvn '-Dtest=GrpcOnlyClusterTest' test` also starts actual worker JVMs against a
-gRPC-only bootstrap, joins them, polls monitoring, kills the coordinator during
-PRIMESUM and checks the recovered answer and completed work. No RMI registry is
-available to those processes. Historical RMI tests exercise compatibility code only.
-
----
-
-## Design Decisions
-
-These are settled interpretations of ambiguous spec points. Keep implementations consistent with these across all worker/election/job-dispatch code.
-
-- **JAC increments per worker assignment, not per client job.** Per the spec: _"The counter is incremented each time that worker, while acting as coordinator, assigns a job to another worker."_ Taken literally, if a single client job is split across 3 other workers, the coordinator's JAC increases by 3 in that one request — not by 1. The JAC's only role is therefore to rank candidates during an election (lowest wins, highest ID breaks ties).
-- **The JAC is charged when the assignment is issued, and is not refunded.** A failed assignment still counts: the coordinator incremented when it decided to assign the share, not when the share arrived. A worker that dies or is unreachable mid-dispatch therefore leaves the JAC slightly higher than the work it actually shed, and it is deliberately not corrected. Undoing the increment would need a rollback path that races other in-flight assignments, and a JAC that is briefly pessimistic is harmless here because it only ranks election candidates. In the gRPC job path, a failed participant's unfinished slice is reassigned to another worker, with local computation as a fallback. Liveness probes do not increment JAC; a new remote assignment does.
-- **A term lasts 5 client jobs, counted per job rather than per assignment.** The job budget is tracked separately from the JAC, so a term's length does not depend on how many workers happen to be active: the coordinator accepts five client jobs, then starts a new election and yields. Counting assignments instead would have ended a term after two jobs on a four-worker cluster, which does not match the "five jobs per term" rule. The counter resets whenever a node becomes the coordinator in a newly concluded election, so each term gets a full budget. Only a concluded election starts a new term: a joining worker adopts the coordinator it is told about locally and does not re-announce it, and the node that wins an election records its announcement before broadcasting, so a repeated or adopted announcement cannot hand a serving coordinator a second budget mid-term.
-- **The fifth job of a term triggers the handover, not the job's completion.** The budget is spent when a job is accepted, so rotation is driven from `submitJob`; waiting for the fifth job to finish would let further jobs slip into a term that was already full. A term that is full also refuses further jobs with a retryable error instead of queueing them, so "at most five jobs" holds under concurrent submissions, and the refusal is safe for clients because the job id is released and the client retries against the new coordinator. The refusal covers the handover itself: the budget is reset the moment the term ends, but the yielding node is still named coordinator until the election concludes, so it refuses work for that whole window rather than starting a fresh budget inside a term the spec has already spent.
-- **The cluster elects a coordinator on its own.** Workers wait a short grace period after registering and start an election only if they still know no coordinator, and a joining worker adopts the leader its peer already knows. No manual step is needed before the first job, and a normal startup converges to a single coordinator.
-- **The coordinator participates in every job's computation.** It does not only delegate — it takes its own share of the workload (its own sub-range/sub-list) alongside the workers it assigns tasks to.
-- **Coordinator failure detection uses heartbeats.** Workers periodically ping the current coordinator; a missed response is what triggers a new election. This is separate from the election-termination mechanism (echo-based, see election design notes).
-- **Worker failure recovery is implemented for gRPC jobs.** Unfinished slices are reassigned and stale attempts cannot alter the result. Coordinator failover merges replicated checkpoints and resumes jobs owned by failed coordinators.
-- **Neighbour connections are bidirectional.** When worker A connects to worker B (via a peer the Bootstrap Node introduced), both A and B add each other to their local neighbour lists — a successful gRPC ConnectPeer call is treated as the acknowledgement, no separate ack message needed.
-- **A departing worker never splits the cluster.** Survivors keep a 2-hop view (each neighbour's neighbour set, seeded on connect and refreshed on traffic). On a clean exit the leaver hands its neighbour set over via `notifyLeaving` before deregistering; on a crash the first failed send to the corpse triggers the same path: prune the dead edge and chain to the smallest-id grandparent, falling back to any live Bootstrap peer. One edge per orphan, deterministic pick, so no islands and no cliques.
-
----
-
-## Election Protocol
-
-See [docs/election.md](docs/election.md) for propagation, duplicate handling, winner rule, coordinator announcement, and 5-job term.
-
----
-
-## gRPC contracts
-
-`src/main/proto/` holds the frozen service contracts (`package distrilab`, field numbers must not change once merged — `ProtoContractsTest` enforces service and method names):
-
-- `progress.proto` — `JobProgressService.WatchJob`: live per-worker progress streams (already wired into workers and the GUI, see [Job progress](#job-progress-first-a2-migration-step)).
-- `registry.proto` — `RegistryService`: Bootstrap discovery (register with auto-assign, deregister, job-id allocation, active-worker and address lookup). Served by the gRPC-only `BootstrapNode` (second argument is its port, default `50051`).
-- `election.proto` — `ElectionService` (wave, echo, coordinator announcement) carrying the election protocol and leadership terms.
-- `job.proto` — `JobService` (submit, assign, report) plus `ClientService.DeliverResult` for the client callback; payloads are `PrimeRange` messages or `repeated int32` lists. Wired into the GUI and worker distribution path.
-
-Maven generates the Java stubs during `compile`. All executable component communication uses gRPC. `control.proto` supplies peer connections, leave notifications, election triggers and status/event snapshots for the GUI. Legacy RMI test fixtures are not used by the executable entry points.
-
----
-
-## Packages
-
-- `common` - shared local interfaces, constants and historical RMI test contracts
-- `bootstrap` - Bootstrap Node
-- `worker` - Worker nodes (election + job execution)
-- `client` - Client GUI
-
-## Updated GUI
-
-The client now has rounded panels, blue buttons, icons, and a job-history table.
-It supports manual input, numeric CSV loading, input validation, and clearing
-input without removing the submitted-job history. `ClientApp.java` handles the
-interface and input; `ClientStyle.java` contains the styling helpers.
-`CsvInputLoader.java` holds the parsing, merging and rendering rules so they
-can be tested without starting a window.
-
-**Load CSVs** accepts one file or several at once. Several files are read in
-filename order, their values are concatenated into a single job, and the merged
-values are shown in the input area, wrapped 20 per line. The combined size of
-the selected files must stay at or below 1 MB. Parsing stays strict in every
-case: bare comma-separated integers only, so quoted fields, headers, empty rows
-and missing values are rejected, and the error names the file that caused it.
-Note that `PRIMESUM` still needs exactly two values in ascending order across
-the whole merged selection, so it is usually a single-file operation.
-
-The GUI validates and submits jobs to the current coordinator: it requests a
-cluster-wide job ID from the Bootstrap node, discovers the coordinator through
-it, submits MAX/PRIMESUM/PRIMECOUNT jobs (PrimeRange payloads for PRIMESUM), and
-fills in the result cell once the coordinator delivers the aggregated answer.
-If the coordinator rotates mid-submit it discovers the new one and retries.
-
-### Cluster activity card
-
-Below the job history, the client shows a **Cluster activity** card: a live worker
-table (`Worker | Role | Coordinator view | Neighbours | JAC | Status`) and a
-timestamped feed of happenings. Each worker keeps a 64-entry ring of its own
-events — elections started and announced, coordinators adopted, neighbour edges
-added/dropped (with the cause), every job slice dispatched and received, and
-clean-exit farewells — exposed via `WorkerRemote.getRecentEvents(seq)`. The
-client polls every 2 seconds off the event thread (plus a manual Refresh button,
-`Alt+R`), drains only unseen sequences, and falls back to snapshot-diff lines
-(joins, leaves, consensus changes) for what workers cannot self-report; a
-snapshot heuristic stays silent whenever the exact worker event already tells
-that story. Kill a middle worker and watch the exact `dropped … (unreachable)`
-+ `chained to …` lines appear, and submit a job to see each slice dispatched and
-received per worker.
-
-The worker table sits above the **System log**. Messages include job/task IDs,
-worker identities and trailing job-type tags such as `[MAX]` or `[PRIMESUM]`.
-The log distinguishes events by color:
-
-- **Green:** worker joins/registration, successful task and job completion.
-- **Blue:** normal information, gRPC submissions and slice distribution.
-- **Orange:** elections, reassignment and recovery in progress.
-- **Red:** worker/coordinator failure, disconnection and errors.
-
-**Auto-scroll** follows new events; **Clear log** clears this client's displayed
-and retained messages while allowing new events to appear. It does not cancel
-jobs or reset worker event cursors. Coordinator recovery emits JOB_RECOVERED and FAILOVER_COMPLETED events.
-
-## Computation
-
-`WorkerTaskCalculator` handles three calculations:
-
-- `MAX`: finds the largest number.
-- `PRIMESUM`: adds the prime numbers.
-- `PRIMECOUNT`: counts prime numbers, including duplicates.
-
-```java
-import com.cs324.worker.WorkerTaskCalculator;
-import com.cs324.worker.WorkerTaskCalculator.PrimeRange;
-
-WorkerTaskCalculator.calculate("MAX", new int[]{3, 7, 12, 45}); // 45
-WorkerTaskCalculator.calculate("PRIMESUM", new PrimeRange(1, 10)); // 17
-WorkerTaskCalculator.calculate("PRIMECOUNT", new int[]{2, 7}); // list: 2
-WorkerTaskCalculator.calculate("PRIMECOUNT", new PrimeRange(2, 7)); // range: 4
-```
-
-Arrays (`int[]` or `Integer[]`) and collections of `Integer` always mean lists,
-even with only two values. Use `PrimeRange(start, end)` for an inclusive range
-in either prime operation. MAX accepts lists only.
-MAX and PRIMECOUNT return `Integer`; PRIMESUM returns `Long`.
-
-Invalid inputs, null entries and reversed ranges raise `IllegalArgumentException`.
-Empty prime lists return zero; an empty MAX list is rejected. Use 32-bit integers;
-decimal values and `long` inputs are rejected rather than silently converted.
-Very wide ranges can still be slow.
-
-The calculator is wired into worker execution: `WorkerRemoteImpl` delegates to
-`WorkerTaskCalculator` for worker assignments and the coordinator's own chunk.
-`WorkerTaskDistributor` supplies the shared chunking and result-combination
-logic used by the coordinator's existing callback-based `submitJob()` flow.
-The coordinator looks up all registered, reachable workers through bootstrap,
-without changing their election-neighbour connections. It registers every expected
-partial result before sending chunks, then combines the answers only after dispatch
-and computation are complete. Each chunk carries the original coordinator's callback,
-so a worker does not need to be its neighbour and a later election does not redirect
-an in-progress job's answer. The existing client callback receives the final value.
-
-Run its tests:
-
-```powershell
-mvn "-Dtest=WorkerTaskCalculatorTest" test
-```
-
-Run the updated client (use the forked form - see [Why fork](#command-line-with-maven-optional)):
-
-```powershell
-java -cp "target/classes;target/dependency/*" com.cs324.client.ClientApp localhost 1099 1199
-```
-
-### Distribution integration
-
-The GUI obtains job IDs from gRPC `RegistryService.AllocateJobId` so concurrent
-clients cannot accidentally reuse IDs. Bootstrap only allocates identifiers and
-provides worker addresses; it does not calculate, split or combine jobs. Clients request their job IDs from bootstrap. IDs last for one bootstrap
-process; restart the whole cluster together when starting a fresh run.
-
-Each client process needs its own gRPC callback port; see the two-client
-commands in [How to Run](#how-to-run-any-ide-or-terminal).
-
-With four registered workers, PRIMESUM(1,1000) splits into 1-250, 251-500,
-501-750 and 751-1000 and combines to **76127**. The coordinator takes the first
-chunk. Smaller lists/ranges may use fewer workers to avoid empty chunks.
-
-### Wide ranges (up to 1B width)
-
-`PRIMESUM` accepts any ascending `start,end` within the 32-bit int range, and
-widths up to a billion submit end-to-end: the splitter uses 64-bit arithmetic
-so chunk boundaries stay exact, and sums/counts still fit their result types.
-Only wall-clock time stands in the way (trial division to √n per number), so
-the client warns before submitting — above 1M width it discloses minutes, above
-100M hours — and proceeds on confirm. The input width is not capped, but the gRPC distribution path has a ten-minute job deadline; a 1B-wide range may need
-hours across the workers and exceed that deadline.
-
-`ClusterDistributionTest` uses four workers connected in a chain over RMI. It
-checks every worker's participation, the assignment's range example, waiting for
-a delayed worker, result delivery after a leader change, and two concurrent client
-callbacks with distinct job IDs. `WorkerDispatchTest` covers the five-job term:
-the coordinator keeps leading through four jobs and rotates to the lowest-JAC
-worker on the fifth. Existing election and threading tests remain intact.
-
-## Job progress (first A2 migration step)
-
-Each job has a Progress column. Click its bar to open a live worker breakdown.
-The percentage is completed input values divided by total input values, weighted
-by the size of each worker's assigned share. For PRIMESUM ranges, each integer in
-the inclusive range counts as one value. Updates occur when a whole worker share
-returns successfully, so small jobs may go straight to 100%, and one large share
-will not show intermediate progress. This is completed work, not elapsed time.
-Errors do not count as successful completion.
-
-Progress snapshots use the Protocol Buffers contract in `src/main/proto/progress.proto`
-and a gRPC server stream. Each worker opens an available progress port at startup;
-the client discovers that port from the coordinator. Maven generates Java protobuf
-and service classes during `compile`; reload the Maven project in your IDE.
-The coordinator retains the latest 256 completed job snapshots, allowing very fast
-jobs to display progress even when they finish before the client subscribes.
-
-Job submission, task delivery, results, progress, elections, neighbour links and cluster monitoring all use gRPC. Progress updates occur at share completion. Interrupted streams reconnect automatically and rediscover the worker holding the job. A 30-second stream deadline also detects silent interruptions; completion remains based on reported work. Worker reassignment is implemented: unfinished units move to the replacement worker without double-counting completed work. Coordinator state recovery is implemented; see [distribution integration](docs/job-distribution.md) for details.
-
-## Worker failure recovery
-
-If a non-coordinator worker closes, crashes or stops responding during an active
-job, the original job coordinator recovers its unfinished slices:
-
-1. Every unfinished remote slice is probed using its idempotent gRPC
-   `AssignTask` call every 500 ms, with a one-second RPC deadline. Workers
-   acknowledge independently of calculation completion, so slow calculations
-   alone do not trigger recovery.
-2. On failure, the coordinator increments the slice's attempt number and refreshes
-   membership through gRPC discovery. It selects another available remote worker,
-   preferring one with fewer outstanding slices for that job. Newly joined workers
-   with published gRPC endpoints are eligible. If no remote candidate is available,
-   or discovery fails, the coordinator computes the slice locally.
-3. Results must match the job, task ID, current attempt and assigned worker.
-   Duplicate and delayed results are acknowledged without changing the calculation.
-   Repeated assignments reuse in-flight work or replay a cached result after a
-   lost callback, rather than repeating the same attempt's calculation.
-4. Actual completed work drives progress. The original coordinator combines each
-   slice once and returns the correct MAX, PRIMESUM or PRIMECOUNT result to the
-   original submitting client, even after a normal coordinator rotation.
-
-The GUI System log identifies the failed worker, reassignment destination and
-accepted task completion. Recovery probes, discovery, assignments and results
-use gRPC. The GUI cluster-monitor event feed also uses gRPC.
-
-### Verify and demonstrate recovery
-
-Run the focused integration tests:
-
-```powershell
-mvn '-Dtest=GrpcWorkerRecoveryTest,GrpcJobDistributionTest' test
-```
-
-These cover stopped and unresponsive workers, joins during active jobs, duplicate
-and delayed results, concurrent jobs, local fallback, lost result callbacks and
-64-bit PRIMESUM range results.
-
-For a manual demo, rebuild and start bootstrap, at least three workers and a
-client using [How to Run](#how-to-run-any-ide-or-terminal). Submit a sufficiently
-long PRIMESUM range and close a non-coordinator worker while its task is still
-processing. Watch the reassignment and completion messages in System log, inspect
-the worker-level progress breakdown, and compare the final result with a run of
-the same input without failure. Start another worker before the failure to make
-it eligible for reassignment. Rebuild and restart workers together after protocol
-changes; restart the client after GUI changes.
-
-### Limits and remaining Assignment 2 work
-
-A timeout indicates a suspected failure: network delays can cause duplicate
-execution, but attempt checks prevent duplicate aggregation. The overall job
-deadline remains ten minutes and recovery does not extend it. Recovery state is
-in memory. Replacing a coordinator that dies mid-job is now handled separately:
-see [coordinator failover](docs/failover.md). Peer links and monitoring now use gRPC as well.
-
-See [recovery rationale and demonstration](docs/job-distribution.md#recovery-rationale-and-demonstration)
-for the design tradeoffs and detailed procedure.
-
----
-
-## Election and failover demo (Member 2)
-
-Two things are demonstrated here: the election running over gRPC, and the
-cluster surviving the death of its coordinator. All workers now start with gRPC enabled; the optional `grpc` argument below remains compatible.
-
-Rebuild first, and restart every node together - a running JVM does not pick up
-new services from a recompile:
-
-```powershell
-.\run.ps1 build
-.\run.ps1 bootstrap
-.\run.ps1 worker localhost 1099 grpc
-.\run.ps1 worker localhost 1099 grpc
-.\run.ps1 worker localhost 1099 grpc
-.\run.ps1 worker localhost 1099 grpc
-.\run.ps1 client localhost 1099 1199
-```
-
-Wait for each worker's `gRPC jobs and progress on port ...` line before starting
-the next one. After about three seconds the cluster elects a coordinator by
-itself; the client's **Cluster activity** card shows one Coordinator row. To
-force another election at any time, press `[1]` in a worker's terminal - the
-wave now travels over `ElectionService.SendElection`, `SendEcho` and
-`AnnounceCoordinator`.
-
-### Killing the coordinator mid-job
-
-1. In the client, submit a **long** `PRIMESUM` range, for example `1,60000000`.
-   A short job finishes before the cluster can notice anything, so the
-   demonstration needs one that is still running in a few seconds.
-2. While its progress breakdown still shows Processing rows, **close the
-   coordinator's terminal window** (or Ctrl+C it). A closed window is a crash:
-   the worker does not deregister, so the directory still lists it.
-3. In the client's **System log**, within roughly three to five seconds:
-
-   ```text
-   COORDINATOR_FAILED   Worker 2 failed after 3 missed probes; electing a replacement
-   FAILOVER_STARTED     coordinator Worker 2 declared failed; starting an election in 210ms
-   FAILOVER_STARTED     merging replicated job state at term 2
-   JOB_RECOVERED        Job 1 (PRIMESUM) resumed at term 2 with 4 unfinished slice(s)
-   FAILOVER_COMPLETED   merged 2 answering peer(s), recovered 1 job(s) at term 2
+   ```powershell
+   .\run.ps1 bootstrap
    ```
 
-4. The cluster activity card shows a different Coordinator row, and the job's
-   progress rows transfer to the new coordinator.
-5. The answer arrives **once**, and it is the same answer the same input
-   produces without any failure. Compare it against a second run of the same
-   input while nothing is being killed.
-6. Repeat by killing the new coordinator. Kill one once with a clean exit (the
-   `Leaving` option, or Ctrl+C) to see the graceful path: survivors are handed
-   the leaver's neighbour set, and the same failover follows.
+2. Start a worker in each of three additional terminals:
 
-### What to check after the kill
+   ```powershell
+   .\run.ps1 worker
+   ```
 
-- The client still receives exactly one result for that job. The answer must be
-  correct: a slice that was recomputed and also counted from its old owner would
-  silently produce a wrong sum, which is the failure mode worth demonstrating.
-- `JOB_RECOVERED` names the job that came back. A job whose owner is still alive
-  is deliberately left alone, so a normal five-job rotation never steals one.
-- Nothing else needs to be restarted. No manual step, no re-submission.
+3. Wait for the workers to report a common coordinator. An election starts
+   automatically after the startup delay, normally about three seconds.
 
-### Automated version
+4. Start the client:
+
+   ```powershell
+   .\run.ps1 client
+   ```
+
+5. Choose MAX, PRIMESUM or PRIMECOUNT, enter the input, and submit. Click the
+   progress bar to inspect each worker's completed and total units.
+
+The worker menu supports `[1] Start Election`, `[2] Show Leader` and `[3] Exit`.
+Use `[3]` for a graceful departure with neighbour repair. Terminating a worker
+process simulates a crash.
+
+### Direct Java commands
+
+These Windows commands are equivalent to the helper script:
 
 ```powershell
-mvn '-Dtest=CoordinatorFailoverTest,GrpcElectionTest' test
+java -cp "bootstrap/target/classes;bootstrap/target/dependency/*" com.cs324.bootstrap.BootstrapNode
+java -cp "worker/target/classes;worker/target/dependency/*" com.cs324.worker.WorkerNode
+java -cp "client/target/classes;client/target/dependency/*" com.cs324.client.ClientApp
 ```
 
-`CoordinatorFailoverTest` does exactly the above over real TCP: four workers, a
-job with every slice dispatched, then the coordinator's server dropped. It
-asserts a replacement is elected within a bound, the job finishes with the exact
-independently computed sum, the client is called back once and progress reaches
-100% on the new coordinator. `GrpcElectionTest` covers the election itself and
-stops the RMI registry first, so its convergence can only have come over gRPC.
+On Linux/macOS, use `:` instead of `;` in each classpath. Each command is a
+separate long-running process. The old root `target/classes` is no longer a
+runtime classpath; use the appropriate application directory.
 
-Design, constants and known gaps: [docs/failover.md](docs/failover.md),
-[docs/election.md](docs/election.md).
+### Ports and optional arguments
+
+| Application | Arguments | Defaults |
+| --- | --- | --- |
+| Bootstrap | `[grpcPort]` | `50051` |
+| Worker | `[bootstrapHost] [bootstrapGrpcPort] [--grpc-port N]` | `localhost 50051` |
+| Client | `[bootstrapHost] [callbackPort] [bootstrapGrpcPort]` | `localhost 1199 50051` |
+
+Workers receive monotonic IDs from bootstrap and bind available gRPC ports
+automatically. `--grpc-port` overrides the worker's positional bootstrap port.
+
+For a second client, use a different callback port:
+
+```powershell
+.\run.ps1 client localhost 1200
+```
+
+For a cluster on bootstrap gRPC port 50060:
+
+```powershell
+.\run.ps1 bootstrap 50060
+.\run.ps1 worker localhost 50060
+.\run.ps1 client localhost 1199 50060
+```
+
+The supplied launcher and callback advertisement assume all processes run on
+the same machine. This is a local demonstration setup.
+
+### IDEs and individual Maven projects
+
+Import the root `pom.xml` as a Maven project and allow the IDE to import all
+modules. Set the project JDK to 25 or newer, then build once to generate the
+protobuf classes. Launch the main class from its application module:
+
+- Bootstrap: `com.cs324.bootstrap.BootstrapNode`
+- Worker: `com.cs324.worker.WorkerNode`
+- Client: `com.cs324.client.ClientApp`
+
+Workers need an interactive console; use the terminal commands if an IDE's
+debug console closes standard input. For NetBeans, select the intended
+application project before using Run Project.
+
+To make shared artifacts available for separate project builds:
+
+```text
+mvn install -DskipTests
+mvn -f bootstrap/pom.xml compile exec:java
+mvn -f worker/pom.xml compile exec:java
+mvn -f client/pom.xml compile exec:java
+```
+
+Run those last three commands in separate terminals. Use the direct Java
+commands for explicit process ownership during crash demonstrations.
+
+## Behaviour and recovery
+
+- **Election:** the lowest job-allocation counter (JAC) wins; ties favour the
+  highest worker ID. Duplicate waves receive an echo, while duplicate
+  announcements stop propagating. Terms prevent older leaders reclaiming control.
+  A winner is announced only when the wave reaches a strict majority of ready
+  workers.
+- **Leadership budget:** a term accepts at most five distinct client jobs.
+  The fifth accepted job triggers an election. JAC increments per remote
+  assignment, separately from the per-job term budget.
+- **Worker failure:** stable task IDs and increasing attempts reject stale results.
+  Discovery is refreshed before reassignment, so newly joined workers can receive
+  unfinished slices. Previously completed slices remain counted once.
+- **Progress:** the server streams completed units; the GUI can show a worker
+  breakdown. Interrupted streams reconnect and rediscover a recovered job's owner.
+- **Coordinator failure:** survivors detect missed heartbeats, elect a leader,
+  merge checkpoint snapshots and resume unfinished work or replay a saved result.
+- **Split-brain guard:** a leader renews a majority lease with bounded status
+  probes. A leader that cannot reach a majority stops accepting jobs and steps
+  down; two isolated minority groups cannot both elect or keep serving.
+- **Acceptance:** the coordinator acknowledges a submission only after a peer
+  confirms the acceptance snapshot. Missing peers, failed replication and stale
+  acknowledgements cause `UNAVAILABLE` before computation starts. The client
+  retries the same job ID; rejected attempts release their leadership slot.
+
+Replication remains in memory and requires at least one surviving replica.
+This is not a durable consensus log: simultaneous loss of the coordinator and
+all replicas can lose work. Leadership is lease-based rather than Raft/Paxos,
+so a majority is required for availability, and losing it reduces availability
+until enough workers return. A lost RPC acknowledgement leaves
+the submission outcome uncertain; retry the **same job ID and payload**, because
+a peer may already have stored it. Later slice/completion replication is
+asynchronous, so a replacement may recompute work whose result was not replicated.
+The GUI deduplicates results by job ID; network callback delivery is not claimed
+to be globally exactly once.
+
+See [Election](docs/election.md), [Job distribution](docs/job-distribution.md),
+[Failover](docs/failover.md), and the [migration record](docs/grpc-module-migration.md).
+
+## Tests and demonstrations
+
+```text
+mvn verify
+mvn "-Dtest=GrpcOnlyClusterTest" test
+mvn "-Dtest=GrpcControlRegressionTest,ReplicationAdmissionTest" test
+```
+
+Tests live in `integration-tests/src/test/java`. The process-level cluster test
+starts actual worker JVMs, joins them through gRPC, kills the coordinator during
+a job, and checks the recovered answer and completed progress. Other tests cover
+stream reconnects, worker failure, late joins, stale results, duplicate submissions,
+term rotation, topology repair, checkpoint ordering, acceptance failures,
+minority-partition quorum safety, leader step-down and the absence of RMI imports
+or supertypes.
+
+For a manual demonstration, run bootstrap, four workers and a client. Submit a
+PRIMESUM range large enough to stay active, then terminate either a participating
+worker or the coordinator. Observe reassignment/election in the event feed, the
+reconnecting progress breakdown and the final result. Restart the departed worker
+to demonstrate a late join. Bootstrap IDs are not reused until bootstrap restarts;
+restart all workers when resetting bootstrap.
+
+## Troubleshooting
+
+- **`release version 25 not supported`:** Maven is using an older JDK.
+- **Missing generated protobuf classes:** build the root project, then refresh the
+  IDE's Maven projects. Generated sources belong to `shared`.
+- **`NoClassDefFoundError: io/grpc/...`:** use the module classpath including
+  `target/dependency/*`, after copying dependencies.
+- **`Address already in use`:** choose another bootstrap or client callback port.
+- **Submission reports unconfirmed acceptance:** start or restore a second worker
+  with a reachable failover service, then retry the same submission.
+- **No coordinator after losing workers:** leadership requires a majority of the
+  ready workers. Restore enough workers to form a majority (for example, three of
+  four); a two-of-four remnant remains safely unavailable.
+- **Worker exits immediately:** its stdin reached EOF. Run it in its own terminal.
+- **Second client receives no results:** give it its own callback port.
+
+## AI assistance
+
+Changes and tests were developed with AI assistance. See the
+[historical audit](docs/ai-assisted-audit.md) and
+[migration record](docs/grpc-module-migration.md) for disclosure.

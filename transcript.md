@@ -1,162 +1,119 @@
+# Part 2 — Leader election and duplicate handling
 
-# Part 2 — Leader Election and Duplicate Handling (Sections 3.1–3.3)
+Updated for the gRPC-only module layout, 20 October 2026.
+Open `worker/src/main/java/com/cs324/worker/WorkerRemoteImpl.java`.
+Use method names when navigating: line numbers change as the implementation evolves.
+This section takes about five minutes.
 
-No new files needed — everything below is in `WorkerRemoteImpl.java`, already
-open. About 5 minutes.
+## Start with the architecture
 
----
+**Show:** the root `pom.xml`, then the `bootstrap`, `worker` and `client` folders.
 
-## Beat 11 — Starting an election
+> “These are separate Maven application projects. They share the protobuf contracts
+> and common helpers in `shared`. Bootstrap allocates IDs and publishes worker
+> endpoints. Workers run the election and computation. The client submits jobs,
+> receives callbacks and watches progress. All network calls use gRPC.”
 
-**Show:** `WorkerRemoteImpl.java:154-158`
+**Show:** `shared/src/main/proto/election.proto`.
 
-```java
-long messageId = ((long) id << 32) | (electionCounter.getAndIncrement());
-seenMessageIds.add(messageId);
+> “The election service has three calls: send a wave, send an echo, and announce
+> the coordinator. Every message carries its election data as protobuf fields.
+> There is no RMI registry or fallback election transport.”
 
-int currentJac = jobAllocationCounter.get();
-ElectionState election = new ElectionState(this.id, this.id, currentJac);
+## Starting an election
+
+**Show:** `startElection()`.
+
+> “The worker builds a unique wave ID from its own ID and a local counter. It
+> starts with itself as the best candidate, remembers its neighbours as pending
+> children, and sends the wave to each neighbour through `GrpcElectionTransport`.
+> If no reachable neighbour remains, the wave can finish immediately.”
+
+**Show:** `GrpcElectionTransport.stubFor()` and its deadline configuration.
+
+> “The transport resolves the published gRPC endpoint through bootstrap. Calls
+> have deadlines, so a failed peer cannot leave one network call waiting forever.
+> An unsuccessful hop removes that peer from the pending work and triggers repair.”
+
+## Choosing the candidate
+
+**Show:** `applyElectionMessage()` and `applyEchoMessage()`.
+
+> “The winner has the lowest job-allocation counter. If the counters are equal,
+> the higher worker ID wins. Both forwarding and echo merging use that rule.
+> JAC counts assignments to other workers; the five-client-job leadership budget
+> is a separate counter.”
+
+## Duplicate waves must receive an answer
+
+**Show:** `elections.compute(...)` and the `alreadySeen` branch in
+`applyElectionMessage()`.
+
+> “The map claims each wave atomically, so concurrent receivers cannot create
+> two independent states for one wave. If we have seen it before, we read the
+> best candidate already known and send an echo back. We do not forward it again.”
+
+> “We must answer rather than silently drop the duplicate. In a triangle, a wave
+> can arrive through two paths. A sender retires its pending child only when it
+> gets an echo or a failed hop. Silence would leave the wave waiting.”
+
+## Echoes finish a wave once
+
+**Show:** `applyEchoMessage()` and `propagateEcho()`.
+
+> “Each echo merges the child's candidate and removes the child from the pending
+> set under the wave's lock. When the set is empty, the echoed flag ensures one
+> completion. A non-root worker echoes upward; the root announces the winner.”
+
+## Announcements are different from waves
+
+**Show:** `applyCoordinatorAnnouncement()` and `acceptLeadership()`.
+
+> “Repeated announcements are dropped without forwarding. Otherwise an
+> announcement could circulate around a cycle forever. They have their own
+> deduplication set, separate from the wave-state map.”
+
+> “An announcement also carries a leadership term. A worker accepts a newer
+> term-and-coordinator view and rejects stale or termless announcements. Receiving
+> the same leadership view again cannot reset the serving coordinator's budget.”
+
+## Rotation and failure
+
+**Show:** `reserveTermSlot()`, `releaseTermSlot()` and `maybeRotateCoordinator()`.
+
+> “A coordinator reserves at most five distinct jobs in one term. Duplicate
+> submissions reuse the existing job. Failed acceptance releases its slot.
+> The fifth accepted job starts a new election, and the old coordinator refuses
+> further jobs during handover.”
+
+**Show:** `ReplicatingCheckpointSink` and `CheckpointReplicator.replicate()`.
+
+> “Before a submission is acknowledged, another worker must confirm its acceptance
+> snapshot. Without a confirmed replica, the coordinator returns a retryable error
+> and starts no computation. That means a demonstration needs at least two workers.”
+
+> “After a coordinator crash, surviving workers elect a replacement and merge
+> checkpoint snapshots. They preserve known completed slices and resume unfinished
+> work. Replication is in memory, so this depends on a replica surviving; it is not
+> a disk-backed quorum system.”
+
+## Evidence to show
+
+Open these files in `integration-tests/src/test/java/com/cs324/`:
+
+- `election/GrpcElectionTest.java`: chain/triangle convergence, winner selection,
+  duplicate echoes and dead peers, using real gRPC calls.
+- `worker/GrpcControlRegressionTest.java`: duplicate submissions, concurrent
+  five-job limits, stale announcements, graceful leave and crash repair.
+- `failover/ReplicationAdmissionTest.java`: failed, stale and valid replication
+  acknowledgements.
+- `worker/GrpcOnlyClusterTest.java`: actual worker JVMs, coordinator termination,
+  recovered answer and completed progress.
+
+Run the focused election/control checks from the repository root:
+
+```text
+mvn "-Dtest=GrpcElectionTest,GrpcControlRegressionTest" test
 ```
 
-**Say:**
-
-> "When a worker starts an election, it builds a unique wave ID from its own
-> worker ID shifted up 32 bits plus its personal counter — so no two workers
-> can ever mint the same ID without coordinating. It votes for itself with its
-> own JAC, records the wave in a map keyed by that ID, marks every neighbour
-> as still outstanding, and sends the wave out."
-
-Point at line 154, then 158. If asked why a map and not a list: "because every
-lookup in the duplicate path is by message ID."
-
-## Beat 12 — The rule: lowest JAC wins, highest ID breaks ties
-
-**Show:** `WorkerRemoteImpl.java:191-199`
-
-```java
-if (currentJac < bestJac) {
-    bestId = this.id;
-    bestJac = currentJac;
-} else if (currentJac == bestJac) {
-    if (this.id > bestId) {
-        bestId = this.id;
-        bestJac = currentJac;
-    }
-}
-```
-
-**Say:**
-
-> "Every worker folds itself in with the same rule: lower JAC wins, and on a
-> tie the higher worker ID wins. Then it forwards the wave to every neighbour
-> except the one it arrived from — that exclusion is what stops the wave
-> bouncing straight back."
-
-**Show:** `WorkerRemoteImpl.java:246` (`if (entry.getKey() != originId)`).
-
-## Beat 13 — Echoes merge, the root announces
-
-**Show:** `WorkerRemoteImpl.java:301-318`
-
-**Say:**
-
-> "As echoes come back, each neighbour's best is merged under one lock and the
-> neighbour is crossed off the waiting list. When nobody is outstanding, the
-> result travels back up — unless this worker started the wave, in which case
-> it writes down the winner and broadcasts it to every neighbour."
-
-**Show:** `WorkerRemoteImpl.java:332-333` (`if (election.parentId == this.id)` … `currentCoordinatorId = …`).
-
-> "Parent equals self means I am the root. Everyone else just echoes upward.
-> And each wave echoes exactly once — see the latch at lines 323 to 329."
-
-## Beat 14 — Duplicates are answered, never dropped (memorise this)
-
-**Show:** `WorkerRemoteImpl.java:207-221`, then `:232-239`
-
-```java
-elections.compute(messageId, (key, existing) -> {
-    if (existing != null) {
-        alreadySeen[0] = existing;   // duplicate: wave already tracked
-        return existing;
-    }
-    ...
-```
-
-```java
-sender.receiveEchoMessage(messageId, this.id, best[0], best[1]);
-...
-return;   // answered, but NOT forwarded again
-```
-
-**Say:**
-
-> "A repeat wave is detected through this map, in one atomic step. And it is
-> not thrown away — the worker reads the best candidate from the wave it is
-> already tracking and echoes it straight back to the sender, without
-> forwarding. Silence would stall the sender forever, because it only crosses
-> a neighbour off when that neighbour's echo arrives."
-
-Then show the codebase saying it for you:
-
-**Show:** `WorkerElectionConvergenceTest.java:24-26`
-
-```java
-// The triangle is deliberate - two of its nodes forward the election to each other, so each
-// gets a duplicate it must answer rather than drop, or those two wait on each other forever.
-```
-
-> "The test file states my thesis for me: in a triangle, two nodes send each
-> other the same wave, and each must answer rather than drop, or both wait
-> forever."
-
-## Beat 15 — Announcements are the opposite: repeats are dropped
-
-**Show:** `WorkerRemoteImpl.java:263-267`
-
-```java
-// First sighting; a broadcast that loops back to us stops here.
-if (!seenCoordinatorMessageIds.add(messageId)) {
-    return;
-}
-```
-
-**Say:**
-
-> "Coordinator announcements use a separate set, and here repeats genuinely
-> are dropped without relay — otherwise the broadcast would circulate a cyclic
-> network forever. Note this is a different set from the election one: waves
-> are answered, announcements are dropped. Mixing those two up is the classic
-> wrong answer."
-
-## Beat 16 — Why cycles make all of this necessary (closing line for Part 2)
-
-**Show:** nothing — then `WorkerElectionConvergenceTest.java:111` (`wireTriangle`) if pressed.
-
-**Say:**
-
-> "The bootstrap hands each newcomer one random peer, so the network grows
-> into cycles — triangles, not rings. In a triangle the wave comes back
-> through the other path looking brand new, which is why detection has to be
-> exact and answers mandatory. Answer once, echo once, relay announcements
-> once — that is the whole termination argument, and the convergence tests
-> prove it across triangle, chain and five-worker topologies."
-
----
-
-## Rehearsal notes
-
-- Memorise three sentences word-for-word: the `putIfAbsent` one (Beat 5), the
-  "no send-me-your-members call anywhere" one (Beat 9), and "each must answer
-  rather than drop, or those two wait on each other forever" (Beat 14). Those
-  are the distinction-grade moments; everything else can be paraphrased.
-- If the lecturer interrupts with "show me," your finger is already on the
-  line — every claim lists its lines.
-- Caveats to keep in mind if questioned:
-  - the bootstrap prunes dead entries lazily on the next join
-    (`BootstrapRegistryImpl.java:61-63`), it is not a liveness monitor;
-  - the duplicate-ID rejection path has code but no dedicated test;
-  - `seenMessageIds` (`WorkerRemoteImpl.java:60`) is an audit record and
-    explicitly *not* the dedup guard — the guard is the `elections` map
-    (`:208-221`). If asked "where do you check for duplicates," point at the
-    map, never the set.
+For setup and a full failure demonstration, follow [README.md](README.md).

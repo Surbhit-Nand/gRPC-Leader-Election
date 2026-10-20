@@ -6,7 +6,7 @@
             "request": "launch",
             "name": "Bootstrap Node (gRPC port 50051)",
             "mainClass": "com.cs324.bootstrap.BootstrapNode",
-            "args": "1099",
+            "args": "50051",
             "console": "internalConsole"
         },
         {
@@ -14,15 +14,15 @@
             "request": "launch",
             "name": "Worker (auto id+port)",
             "mainClass": "com.cs324.worker.WorkerNode",
-            "args": "localhost 1099",
-            "console": "internalConsole"
+            "args": "localhost 50051",
+            "console": "integratedTerminal"
         },
         {
             "type": "jdk",
             "request": "launch",
             "name": "Client App (callback port 1199)",
             "mainClass": "com.cs324.client.ClientApp",
-            "args": "localhost 1099 1199",
+            "args": "localhost 1199 50051",
             "console": "internalConsole"
         },
         {
@@ -30,7 +30,7 @@
             "request": "launch",
             "name": "Client App 2 (callback port 1200)",
             "mainClass": "com.cs324.client.ClientApp",
-            "args": "localhost 1099 1200",
+            "args": "localhost 1200 50051",
             "console": "internalConsole"
         }
     ]

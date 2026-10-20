@@ -1,5 +1,8 @@
 # AI tools usage log - Member 2 (leader election and coordinator failover)
 
+> Historical implementation log. Paths and compatibility descriptions below
+> predate the [gRPC-only module migration](grpc-module-migration.md).
+
 A running record of what was generated or changed with AI assistance, per file, so the
 report's AI-tools page is accurate. Written by hand from the git history of
 `feature/leader-election-grpc` and `feature/coordinator-failover`.
@@ -25,7 +28,7 @@ and to take the less invasive option where two were reasonable.
 | `src/main/proto/failover.proto` | New contract: `Heartbeat`, `Replicate`, `FetchCheckpoints` and the checkpoint entry kinds. Deliberately a new file so no frozen proto was renumbered. |
 | `src/main/java/com/cs324/election/ElectionTransport.java` | Transport seam for one election hop. |
 | `src/main/java/com/cs324/election/GrpcElectionTransport.java` | gRPC hops: registry-resolved endpoints, one cached channel per peer, per-call deadlines. |
-| `src/main/java/com/cs324/election/RmiElectionTransport.java` | Legacy RMI hops, kept as the fallback and for the existing tests. |
+| `src/main/java/com/cs324/election/RmiElectionTransport.java` | Removed in the 20 October gRPC-only migration; no RMI fallback remains. |
 | `src/main/java/com/cs324/election/ElectionHandler.java` | The worker's election entry points, in the shape the service needs. |
 | `src/main/java/com/cs324/election/ElectionGrpcService.java` | Server side of `ElectionService`. |
 | `src/main/java/com/cs324/failover/CheckpointLog.java` | The replica: folds entries per job by sequence and term. |
@@ -40,7 +43,7 @@ and to take the less invasive option where two were reasonable.
 | `src/main/java/com/cs324/failover/FailoverHandler.java` | Worker-side behaviour the failover service needs. |
 | `src/main/java/com/cs324/failover/FailoverGrpcService.java` | Server side of `FailoverService`. |
 | `src/main/java/com/cs324/failover/RestoredJob.java` | A replicated job handed back to the job service. |
-| `src/test/java/com/cs324/election/GrpcElectionTest.java` | Election over real TCP, RMI peer links stopped first. |
+| `src/test/java/com/cs324/election/GrpcElectionTest.java` | Election over real TCP gRPC; the legacy transport was removed. |
 | `src/test/java/com/cs324/failover/CoordinatorFailoverTest.java` | End-to-end coordinator failure and recovery. |
 | `src/test/java/com/cs324/failover/CoordinatorHealthTest.java` | The liveness rule, including the demo timing window. |
 | `src/test/java/com/cs324/failover/CheckpointLogTest.java` | Folding: duplicates, stale entries, deposed writers. |
@@ -95,7 +98,8 @@ No existing field was renumbered, removed or retyped, and no RPC was added or re
 
 ### `src/main/java/com/cs324/common/Constants.java` (shared)
 
-Added the `FAILOVER_*` block and `LEGACY_RMI_HEARTBEAT_ENABLED`. No existing constant changed
+Added the `FAILOVER_*` block. The historical `LEGACY_RMI_HEARTBEAT_ENABLED` flag was
+removed by the gRPC-only migration. No existing constant changed
 value. Another member is moving configuration to files, so these belong together with theirs
 when that happens.
 

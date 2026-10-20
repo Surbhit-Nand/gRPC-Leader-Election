@@ -1,0 +1,82 @@
+// Bootstrap discovery contract.
+// Field numbers are FROZEN once merged: progress.proto sets the precedent,
+// and Members 2-4 build against these shapes.
+//
+// A1 semantics preserved, not renegotiated:
+// - Worker ids are monotonic and never reused within one Bootstrap run;
+//   deregistration does not rewind the counter (matches WorkerRegistration).
+// - Register returns one published peer; the joiner probes it with a deadline.
+// - Duplicate manual ids fail with ALREADY_EXISTS.
+// - port is retained as unused registration metadata for wire compatibility.
+//   All peer RPCs use host and grpc_port.
+syntax = "proto3";
+package distrilab;
+option java_package = "com.cs324.registry.proto";
+option java_multiple_files = true;
+
+service RegistryService {
+  // One atomic call: allocate (or claim) the id, record the address, return a peer.
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Deregister(DeregisterRequest) returns (DeregisterResponse);
+  rpc AllocateJobId(AllocateJobIdRequest) returns (AllocateJobIdResponse);
+  rpc GetActiveWorkers(GetActiveWorkersRequest) returns (GetActiveWorkersResponse);
+  rpc GetWorkerAddress(GetWorkerAddressRequest) returns (GetWorkerAddressResponse);
+}
+
+// Contact point of one worker as published by the directory.
+message WorkerEndpoint {
+  int32 worker_id = 1;
+  string host = 2;
+  int32 port = 3;
+  // JobService and JobProgressService port; zero until the worker is ready.
+  int32 grpc_port = 4;
+}
+
+message RegisterRequest {
+  // Ignored when auto_assign is true; claimed when false.
+  int32 worker_id = 1;
+  string host = 2;
+  int32 port = 3;
+  // True mirrors registerWorkerAuto: the server allocates the next monotonic id.
+  // False mirrors registerWorker: the caller claims worker_id (hidden manual path).
+  bool auto_assign = 4;
+  int32 grpc_port = 5;
+  // Publish the gRPC listener after auto-ID registration. Existing identity,
+  // host and contact port must match; this never allocates or reuses an ID.
+  bool update_endpoint = 6;
+}
+
+message RegisterResponse {
+  int32 worker_id = 1;
+  // False means this worker is first: peer is unset, nothing to join.
+  bool has_peer = 2;
+  WorkerEndpoint peer = 3;
+}
+
+message DeregisterRequest {
+  int32 worker_id = 1;
+}
+
+message DeregisterResponse {}
+
+message AllocateJobIdRequest {}
+
+message AllocateJobIdResponse {
+  int32 job_id = 1;
+}
+
+message GetActiveWorkersRequest {}
+
+message GetActiveWorkersResponse {
+  repeated int32 worker_ids = 1;
+}
+
+message GetWorkerAddressRequest {
+  int32 worker_id = 1;
+}
+
+message GetWorkerAddressResponse {
+  // False means unknown (deregistered or never registered): worker is unset.
+  bool found = 1;
+  WorkerEndpoint worker = 2;
+}
