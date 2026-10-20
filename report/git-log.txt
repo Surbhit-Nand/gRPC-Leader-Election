@@ -1,3 +1,8 @@
+* 52739d0 2026-10-20 Surbhit Nand	Add submission-ready A2 Word report package
+* 1a532c8 2026-10-20 Surbhit Nand	Document operational limits, leases and verification
+* 9e88cec 2026-10-20 Surbhit Nand	Add CI, coverage and scale checks
+* 15fa1fb 2026-10-20 Surbhit Nand	Bound coordinator retention and share gRPC channels
+* 6eb9225 2026-10-20 Surbhit Nand	Harden bootstrap membership leases and persist ID counters
 * bb2090e 2026-10-20 Alvin Kumar	feat(grpc): modularize cluster and enforce quorum leadership
 *   ef19cda 2026-10-20 Surbhit Nand	Merge origin/main into main
 |\  
