@@ -38,7 +38,15 @@ switch ($command) {
         Write-Host "Build OK. Launch nodes with .\run.ps1 bootstrap|worker|client"
     }
     "bootstrap" {
-        $bootstrapArgs = if ($args.Count -ge 2) { $args[1..($args.Count - 1)] } else { @("50051") }
+        # Keep this an array: assigning the output of an `if` expression unwraps a
+        # single-element array to a string, and splatting that string passes it
+        # to Java one character per argument.
+        $bootstrapArgs = @()
+        if ($args.Count -ge 2) {
+            $bootstrapArgs = $args[1..($args.Count - 1)]
+        } else {
+            $bootstrapArgs = @("50051")
+        }
         & java -cp (Get-Classpath "bootstrap") com.cs324.bootstrap.BootstrapNode @bootstrapArgs
     }
     "worker" {
