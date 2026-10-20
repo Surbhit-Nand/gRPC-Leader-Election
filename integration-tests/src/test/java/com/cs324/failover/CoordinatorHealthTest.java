@@ -13,10 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * The liveness rule, with no network in it: what counts as active, what counts as slow, and
- * what - and only what - is allowed to start an election.
- */
+// Test health thresholds and failure transitions without network timing.
 class CoordinatorHealthTest {
 
     private static final int THRESHOLD = 3;

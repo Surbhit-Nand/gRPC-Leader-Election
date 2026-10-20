@@ -12,7 +12,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Exercises actual discovery, control, and job RPCs. */
+// Exercises actual discovery, control, and job RPCs.
 class GrpcControlRegressionTest {
     private final List<WorkerRuntime> workers = new ArrayList<>();
     private final List<ManagedChannel> channels = new ArrayList<>();
@@ -152,8 +152,7 @@ class GrpcControlRegressionTest {
         var one = worker(1);
         var two = worker(new WorkerRuntime(2) {
             @Override public long startElection() {
-                // Keep the original term closed while all concurrent RPCs finish.
-                // Otherwise a legitimate new term could accept some of the callers.
+                // Keep the original term closed while all concurrent RPCs finish. Otherwise a legitimate new term could accept some of the callers.
                 try {
                     if (!releaseElection.await(20, TimeUnit.SECONDS))
                         throw new AssertionError("test did not release the election");

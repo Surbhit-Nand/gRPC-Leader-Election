@@ -11,8 +11,7 @@ public final class WorkerTaskDistributor {
     // Static helper only; there is no state to instance.
     private WorkerTaskDistributor() {}
 
-    // Build balanced, non-overlapping shares without changing the caller's input.
-    // Small inputs use fewer workers so no empty MAX share is dispatched.
+    // Split inputs into balanced, non-empty shares without modifying the original input.
     public static List<Object> split(String jobType, Object payload, int workers) {
         // A split into zero pieces would lose the job, so require at least one.
         if (workers < 1) throw new IllegalArgumentException("At least one worker is required.");
@@ -65,8 +64,7 @@ public final class WorkerTaskDistributor {
             chunks.add(values);
             return chunks;
         }
-        // Spread values evenly, giving the remainder to the leading chunks.
-        // Fewer chunks than values keeps every dispatched worker actually busy.
+        // Spread values evenly, giving the remainder to the leading chunks. Fewer chunks than values keeps every dispatched worker actually busy.
         int count = Math.min(workers, values.length);
         int start = 0;
         for (int i = 0; i < count; i++) {

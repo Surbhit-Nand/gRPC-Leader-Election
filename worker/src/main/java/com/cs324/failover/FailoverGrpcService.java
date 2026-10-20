@@ -14,14 +14,7 @@ import io.grpc.stub.StreamObserver;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Server side of {@code FailoverService}.
- *
- * <p>All three RPCs are held by every worker, because any of them may be the survivor: a
- * follower answers probes about itself, and every worker keeps a replica that a later
- * coordinator can read. A handler failure is reported as an error status, so the caller
- * treats the peer as unreachable instead of assuming the entry was stored.
- */
+// Serve liveness probes and checkpoint replication on every worker.
 public final class FailoverGrpcService extends FailoverServiceGrpc.FailoverServiceImplBase {
 
     private final FailoverHandler handler;

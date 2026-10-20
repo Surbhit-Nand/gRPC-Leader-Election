@@ -19,8 +19,7 @@ public final class WorkerTaskCalculator {
         }
     }
 
-    // Entry point for all three job types; the type is matched case-insensitively.
-    // Bad payloads and an empty MAX list throw; empty prime lists return zero.
+    // Run MAX, PRIMESUM or PRIMECOUNT; invalid payloads and empty MAX lists are rejected.
     public static Number calculate(String jobType, Object payload) {
         checkInterrupted();
         // Prime sums accumulate as long, because the total can exceed one integer.

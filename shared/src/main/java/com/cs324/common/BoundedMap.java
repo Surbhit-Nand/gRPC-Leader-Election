@@ -4,16 +4,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.function.BiFunction;
 
-/**
- * A thread-safe insertion-ordered map that evicts the least recently used entry
- * once it grows past a fixed bound.
- *
- * <p>The coordinator keeps a few maps for idempotency and task deduplication.
- * Those maps must not grow for the lifetime of a long-running worker: an
- * unbounded submission table would eventually leak every job the worker ever
- * coordinated. The bound is deliberately generous; it preserves the duplicate
- * window needed by clients and still keeps memory predictable.
- */
+// Thread-safe bounded map; accessing an entry refreshes its eviction order.
 public final class BoundedMap<K, V> {
 
     private final int maxSize;

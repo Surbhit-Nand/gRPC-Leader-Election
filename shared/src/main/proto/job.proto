@@ -1,24 +1,11 @@
-// Job-distribution contract: submission, assignments, results and client callbacks.
-// Field numbers are FROZEN once merged. Splitting, aggregation, term budget,
-// retries, and unfinished-task recovery stay with Member 3; this file only
-// fixes payload encoding and endpoints.
-//
-// Payload encoding:
-// - PrimeRange{start, end} travels as a message for PRIMESUM/PRIMECOUNT ranges;
-//   lists travel as repeated int32 (32-bit values only, matching today's ints).
-// - No bytes blobs: every payload stays inspectable in logs and tests.
-// - Results are a oneof: MAX/PRIMECOUNT answer int32, PRIMESUM answers int64,
-//   failures travel as error text (matches today's "Error ..." strings).
-// - Client callback: the coordinator delivers via ClientService.DeliverResult
-//   to the gRPC endpoint the client published at submission time.
+// Typed job requests and results; preserve field numbers for wire compatibility.
 syntax = "proto3";
 package distrilab;
 option java_package = "com.cs324.job.proto";
 option java_multiple_files = true;
 
 service JobService {
-  // Coordinator entry point: split and dispatch. Acceptance only; the final
-  // answer arrives via ClientService.DeliverResult.
+  // Coordinator entry point: split and dispatch. Acceptance only; the final answer arrives via ClientService.DeliverResult.
   rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse);
   // One slice handed to one worker; fire-and-return like assignTask.
   rpc AssignTask(TaskAssignment) returns (TaskAck);
@@ -47,16 +34,14 @@ message TaskPayload {
   }
 }
 
-// Where a client receives its answer: host/port of the client's callback
-// server. The name field is retained as optional metadata.
+// Where a client receives its answer: host/port of the client's callback server. The name field is retained as optional metadata.
 message ClientEndpoint {
   string host = 1;
   int32 port = 2;
   string name = 3;
 }
 
-// Where a slice answer must be reported while leadership may be moving
-// (the coordinator's current gRPC listener).
+// Where a slice answer must be reported while leadership may be moving (the coordinator's current gRPC listener).
 message CoordinatorEndpoint {
   int32 worker_id = 1;
   string host = 2;

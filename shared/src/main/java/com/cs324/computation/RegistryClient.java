@@ -7,7 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
-/** gRPC discovery client. The contact-port field is unused compatibility metadata. */
+// gRPC discovery client. The contact-port field is unused compatibility metadata.
 public final class RegistryClient implements AutoCloseable, com.cs324.common.ClusterDirectory {
     private final ManagedChannel channel;
     public RegistryClient(String host, int port) {
@@ -16,8 +16,7 @@ public final class RegistryClient implements AutoCloseable, com.cs324.common.Clu
     private RegistryServiceGrpc.RegistryServiceBlockingStub stub() {
         return RegistryServiceGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS);
     }
-    // Publish the bound job/progress listener without allocating another worker identity.
-    // The contact-port field is retained on the wire but is never used for communication.
+    // Publish the job/progress listener without allocating another worker ID.
     public void publish(int id, String host, int contactPort, int grpcPort) {
         stub().register(RegisterRequest.newBuilder().setWorkerId(id).setHost(host).setPort(contactPort)
                 .setGrpcPort(grpcPort).setUpdateEndpoint(true).build());

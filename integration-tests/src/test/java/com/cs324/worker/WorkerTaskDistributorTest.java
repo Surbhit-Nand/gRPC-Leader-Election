@@ -46,8 +46,7 @@ class WorkerTaskDistributorTest {
         assertEquals(1, WorkerTaskDistributor.split("PRIMESUM", new int[0], 3).size());
     }
 
-    // Billion-wide ranges split into contiguous, gapless, fully covering chunks.
-    // Pure endpoint math, so it proves the shape without computing a billion primes.
+    // Verify gapless, balanced range coverage using endpoints instead of calculating the primes.
     @Test void billionWideRangesSplitContiguously() {
         for (PrimeRange range : List.of(
                 new PrimeRange(1, 1_000_000_000),

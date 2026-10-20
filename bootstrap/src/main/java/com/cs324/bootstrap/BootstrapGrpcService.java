@@ -17,8 +17,7 @@ import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 
 
-// The directory's only network transport. Duplicate IDs map to ALREADY_EXISTS;
-// exhausted job IDs map to RESOURCE_EXHAUSTED.
+// The directory's only network transport. Duplicate IDs map to ALREADY_EXISTS; exhausted job IDs map to RESOURCE_EXHAUSTED.
 public class BootstrapGrpcService extends RegistryServiceGrpc.RegistryServiceImplBase {
 
     private final BootstrapRegistryImpl directory;

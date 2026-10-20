@@ -18,11 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * Folding rules for the replicated log. Every one of these cases is something that really
- * happens on the wire: a duplicate push, a delta that arrives before its acceptance, an
- * entry from a coordinator that has since been deposed.
- */
+// Verify duplicate, reordered and stale-term checkpoint handling.
 class CheckpointLogTest {
 
     private static final long TERM_ONE = 1L;

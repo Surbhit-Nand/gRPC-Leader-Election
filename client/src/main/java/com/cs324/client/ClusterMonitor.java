@@ -16,25 +16,19 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 
-// Headless cluster observer for the GUI: polls the directory plus every worker
-// (snapshot rows and each worker's sequenced event log), then merges exact
-// worker happenings with snapshot-diff lines for what workers cannot self-report.
-// All network calls happen on the caller's thread, never on the Swing event thread.
+// Poll worker snapshots and event logs off the Swing event thread.
 public final class ClusterMonitor {
 
-    // Resolves a worker stub for one directory entry; null means unreachable.
-    // Production passes a gRPC adapter; tests may pass a map-backed fake.
+    // Resolve a worker client; null means unreachable.
     public interface WorkerLookup {
         WorkerControl lookup(int workerId, WorkerAddress address);
     }
 
-    // One polled worker. Unreachable rows keep id/host/port so the table
-    // can still show them; their view is -1 and their JAC reads as 0.
+    // One polled worker. Unreachable rows keep id/host/port so the table can still show them; their view is -1 and their JAC reads as 0.
     public record WorkerRow(int workerId, String host, int contactPort,
             int coordinatorView, Set<Integer> neighbours, int jac, boolean alive) {}
 
-    // Consensus coordinator across alive rows: most-reported non--1 view,
-    // smallest id wins ties; -1 when nobody knows one yet.
+    // Consensus coordinator across alive rows: most-reported non--1 view, smallest id wins ties; -1 when nobody knows one yet.
     public record ClusterSnapshot(List<WorkerRow> rows, int consensusCoordinator) {}
 
     // One feed line with its timestamp; the UI formats the time.
@@ -42,17 +36,13 @@ public final class ClusterMonitor {
 
     private ClusterMonitor() {}
 
-    // Snapshot the whole cluster. A dead worker becomes an unreachable row;
-    // only a dead directory fails the poll.
+    // Snapshot the whole cluster. A dead worker becomes an unreachable row; only a dead directory fails the poll.
     public static ClusterSnapshot poll(ClusterDirectory bootstrap, WorkerLookup lookup)
             {
         return pollWithEvents(bootstrap, lookup, new HashMap<>()).snapshot();
     }
 
-    // Snapshot plus this round's exact worker events, oldest first. lastSeq tracks
-    // the newest sequence shown per worker across polls; unknown workers are
-    // seeded silently (their backlog becomes the baseline, not feed spam).
-    // Returned alongside the snapshot so the caller paints both atomically.
+    // Fetch only events newer than each worker cursor; seed new workers without replaying their backlog.
     public record PollResult(ClusterSnapshot snapshot, List<ClusterEvent> workerEvents,
             Map<Integer, Set<String>> exactKindsByWorker) {}
 
@@ -193,16 +183,12 @@ public final class ClusterMonitor {
         return "Worker";
     }
 
-    // Derives feed events from two snapshots. A null prev means first poll:
-    // one summary line instead of a join per worker.
+    // Derives feed events from two snapshots. A null prev means first poll: one summary line instead of a join per worker.
     public static List<ClusterEvent> diff(ClusterSnapshot prev, ClusterSnapshot curr) {
         return diff(prev, curr, Map.of());
     }
 
-    // Same, but skips a heuristic line when the worker's own exact events already
-    // tell that story this round (rewire heuristic vs NEIGHBOUR_ADDED/REMOVED,
-    // JAC heuristic vs TASK_DISPATCHED). Death/reachability lines always stay:
-    // a dead worker cannot report itself.
+    // Skip inferred events already reported by workers, but retain reachability changes.
     public static List<ClusterEvent> diff(ClusterSnapshot prev, ClusterSnapshot curr,
             Map<Integer, Set<String>> exactKindsByWorker) {
         List<ClusterEvent> events = new ArrayList<>();

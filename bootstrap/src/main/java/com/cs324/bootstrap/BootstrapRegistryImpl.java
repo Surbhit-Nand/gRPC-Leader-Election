@@ -8,13 +8,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * In-memory discovery directory. All network access is through RegistryService.
- *
- * <p>Membership entries carry a last-seen timestamp that is refreshed by registration and by
- * endpoint publication. {@link #expireIdle(long)} removes workers that stopped refreshing, so a
- * crashed process cannot remain in the directory (and inflate every quorum calculation) forever.
- */
+// In-memory directory with renewable membership leases; network access uses RegistryService.
 public class BootstrapRegistryImpl implements ClusterDirectory {
     private final Map<Integer, WorkerAddress> activeWorkers = new ConcurrentHashMap<>();
     private final Map<Integer, Long> lastSeen = new ConcurrentHashMap<>();
@@ -99,11 +93,7 @@ public class BootstrapRegistryImpl implements ClusterDirectory {
         lastSeen.put(id, System.currentTimeMillis());
     }
 
-    /**
-     * Removes workers whose last registration/publication is older than {@code ttlMillis}.
-     *
-     * @return the IDs that were evicted, so the bootstrap can report the membership change
-     */
+    // Remove workers with expired leases and return their IDs.
     synchronized List<Integer> expireIdle(long ttlMillis) {
         if (ttlMillis < 1) throw new IllegalArgumentException("A positive TTL is required");
         long cutoff = System.currentTimeMillis() - ttlMillis;

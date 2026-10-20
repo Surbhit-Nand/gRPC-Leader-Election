@@ -17,21 +17,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
-/**
- * Election hop over gRPC.
- *
- * <p>Peer endpoints come from {@code RegistryService.GetWorkerAddress}, which
- * publishes a worker's {@code grpc_port}, so nothing here guesses a port.
- * Endpoints are resolved lazily and one
- * {@link ManagedChannel} is cached per peer, because a wave fans out along many
- * hops and reconnecting per hop would dominate the latency.
- *
- * <p>After a failed hop the caller is told the peer was not reached and removes
- * the edge. Which failures invalidate
- * the cached channel is deliberate - an {@code UNAVAILABLE} peer may have restarted
- * on a different port, so the entry is dropped and re-resolved, while a
- * {@code DEADLINE_EXCEEDED} peer is merely slow and its channel is still correct.
- */
+// Resolve peer endpoints through the directory and reuse channels for election messages.
 public final class GrpcElectionTransport implements ElectionTransport {
 
     private record Peer(String host, int port, ManagedChannel channel) {}
@@ -104,7 +90,7 @@ public final class GrpcElectionTransport implements ElectionTransport {
         }
     }
 
-    /** One failure funnel, so every hop logs the same way and invalidates the same way. */
+    // One failure funnel, so every hop logs the same way and invalidates the same way.
     private boolean failed(int peerId, String what, Throwable error) {
         Status status = Status.fromThrowable(error);
         if (status.getCode() == Status.Code.UNAVAILABLE || status.getCode() == Status.Code.INTERNAL
@@ -116,7 +102,7 @@ public final class GrpcElectionTransport implements ElectionTransport {
         return false;
     }
 
-    /** Cached channel per peer, resolved through the directory on first use. */
+    // Cached channel per peer, resolved through the directory on first use.
     private synchronized ElectionServiceGrpc.ElectionServiceBlockingStub stubFor(int peerId) {
         if (closed.get()) {
             throw new IllegalStateException("Election transport for Worker " + selfId + " is closed");
@@ -143,7 +129,7 @@ public final class GrpcElectionTransport implements ElectionTransport {
                 .withDeadlineAfter(deadlineMillis, TimeUnit.MILLISECONDS);
     }
 
-    /** Forgets a peer so the next hop resolves its endpoint again after a restart. */
+    // Forgets a peer so the next hop resolves its endpoint again after a restart.
     private void drop(int peerId, String reason) {
         Peer removed = peers.remove(peerId);
         if (removed != null) {

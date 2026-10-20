@@ -3,7 +3,7 @@ package com.cs324.common;
 import java.util.List;
 import java.util.Set;
 
-/** Local control API implemented by the worker and its protobuf/gRPC client. */
+// Local control API implemented by the worker and its protobuf/gRPC client.
 public interface WorkerControl {
     default int getProgressPort() { return -1; }
     int getId();

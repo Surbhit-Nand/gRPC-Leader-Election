@@ -6,8 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-// Tier boundaries of the pre-submit width warning: silent when fast,
-// minutes-tier above 1M, hours-tier above 100M, never a refusal.
+// Tier boundaries of the pre-submit width warning: silent when fast, minutes-tier above 1M, hours-tier above 100M, never a refusal.
 class RangeWarningTest {
 
     @Test

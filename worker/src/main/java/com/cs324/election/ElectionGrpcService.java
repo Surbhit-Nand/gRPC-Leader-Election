@@ -10,15 +10,7 @@ import com.cs324.election.proto.ElectionServiceGrpc;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 
-/**
- * Server side of {@code ElectionService}: translates the wire into the worker's
- * election algorithm and reports transport failure back to the caller.
- *
- * <p>The three RPCs answer an empty ack, exactly as the frozen contract intends,
- * so a transport failure on the caller's side means the hop failed: drop the edge. A hop
- * that the worker handled but whose onward relay hit a dead peer still acks - the
- * relay failure is owned by the worker, which rewires that edge itself.
- */
+// Translate election RPCs into worker calls and report handler failures as gRPC errors.
 public final class ElectionGrpcService extends ElectionServiceGrpc.ElectionServiceImplBase {
 
     private final ElectionHandler handler;
@@ -66,7 +58,7 @@ public final class ElectionGrpcService extends ElectionServiceGrpc.ElectionServi
         }
     }
 
-    /** Runs the handler and answers with an error status if it fails, so the caller can drop the edge. */
+    // Runs the handler and answers with an error status if it fails, so the caller can drop the edge.
     private boolean deliver(StreamObserver<?> response, Runnable action) {
         try {
             action.run();

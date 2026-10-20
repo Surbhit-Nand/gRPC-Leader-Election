@@ -11,14 +11,12 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-// Entry point for the Bootstrap Node: its own process, holding only the worker registry.
-// The executable serves gRPC only.
+// Entry point for the Bootstrap Node: its own process, holding only the worker registry. The executable serves gRPC only.
 public class BootstrapNode {
 
     public static void main(String[] args) throws Exception {
         try {
-            // Usage: BootstrapNode [grpcPort] [--state-file path].
-            // Ports come from args, so several clusters can run side by side.
+            // Usage: BootstrapNode [grpcPort] [--state-file path]. Ports come from args, so several clusters can run side by side.
             String stateFile = System.getProperty("bootstrap.state.file", "bootstrap-state.properties");
             List<String> positional = new ArrayList<>();
             for (int i = 0; i < args.length; i++) {
@@ -48,8 +46,7 @@ public class BootstrapNode {
                     .build()
                     .start();
 
-            // A crashed worker never deregisters. The reaper turns its stale directory entry
-            // into a real membership change, which keeps quorum denominators honest.
+            // Expire stale directory entries so crashed workers do not remain in quorum counts.
             ScheduledExecutorService reaper = Executors.newSingleThreadScheduledExecutor(r -> {
                 Thread thread = new Thread(r, "bootstrap-lease-reaper");
                 thread.setDaemon(true);

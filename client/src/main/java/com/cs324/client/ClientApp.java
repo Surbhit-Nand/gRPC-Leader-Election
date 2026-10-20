@@ -25,12 +25,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import static com.cs324.client.ClientStyle.*;
 
-// Swing client: prepares input, submits to the current coordinator, then shows the result.
-// Arguments: [bootstrapHost] [callbackPort] [bootstrapGrpcPort].
+// Swing client for job submission, results and cluster monitoring.
 public class ClientApp extends JFrame {
 
-    // Colours, rounded panels and icons come from ClientStyle via the static import above.
-    // Bootstrap endpoint, plus this client's gRPC callback port.
+    // Bootstrap endpoint and this client callback port.
     private final String bootstrapHost;
     private final int clientPort;
     private final int bootstrapGrpcPort;
@@ -88,8 +86,7 @@ public class ClientApp extends JFrame {
     private final CardLayout historyLayout = new CardLayout();
     private final JPanel historyContent = new JPanel(historyLayout);
 
-    // Cluster-activity view: worker snapshot table plus a feed of derived happenings.
-    // Polling only \u2014 workers expose no extra state, events come from snapshot diffs.
+    // Display worker snapshots and sequenced events fetched by background polling.
     private final DefaultTableModel clusterModel = new DefaultTableModel(
             new String[]{"Worker", "Role", "Coordinator view", "Neighbours", "JAC", "Status", "Actions"},
             0
@@ -228,8 +225,7 @@ public class ClientApp extends JFrame {
         fields.add(inputPanel, BorderLayout.CENTER);
         composer.add(fields, BorderLayout.CENTER);
 
-        // File and clear actions stay secondary; submitting is the primary action.
-        // Mnemonics provide keyboard shortcuts, such as Alt+L for loading a file on Windows.
+        // Provide keyboard mnemonics for the input actions.
         JButton loadCsvButton = button("Load CSVs", "folder", false);
         JButton submitButton = button("Submit job", "send", true);
         JButton clearButton = button("Clear input", "trash", false);
@@ -385,8 +381,7 @@ public class ClientApp extends JFrame {
         footer.add(connectionHint, BorderLayout.EAST);
         root.add(footer, BorderLayout.SOUTH);
 
-        // Event handlers connect user actions to behaviour; building buttons alone does not.
-        // Clearing input deliberately retains job history.
+        // Clearing the input retains previous jobs in the history table.
         jobTypeBox.addActionListener(event -> updateExample());
         loadCsvButton.addActionListener(event -> loadCsvFiles());
         submitButton.addActionListener(event -> submitJob());
@@ -542,8 +537,7 @@ public class ClientApp extends JFrame {
         return activityRow;
     }
 
-    // One poll off the EDT: snapshot the cluster, diff against the last view,
-    // then paint the table and feed on the event thread.
+    // One poll off the EDT: snapshot the cluster, diff against the last view, then paint the table and feed on the event thread.
     private void refreshClusterNow() {
         refreshClusterNow(false);
     }
@@ -678,8 +672,7 @@ public class ClientApp extends JFrame {
         }
     }
 
-    // Opens a multi-select chooser and merges every chosen file into one payload.
-    // Cancellation or invalid data leaves the previous input untouched.
+    // Merge selected files only after validation; cancellation leaves the existing input intact.
     private void loadCsvFiles() {
         JFileChooser chooser = new JFileChooser();
         chooser.setFileFilter(
@@ -698,8 +691,7 @@ public class ClientApp extends JFrame {
         String operation = (String) jobTypeBox.getSelectedItem();
 
         try {
-            // CsvInputLoader validates the merged values, so nothing is replaced
-            // until the whole selection is known to be submittable.
+            // CsvInputLoader validates the merged values, so nothing is replaced until the whole selection is known to be submittable.
             long[] values = CsvInputLoader.loadMerged(Arrays.asList(files), operation);
 
             inputArea.setText(CsvInputLoader.toCsv(values));
@@ -716,8 +708,7 @@ public class ClientApp extends JFrame {
         }
     }
 
-    // Typed input and loaded files share CsvInputLoader, so both reach submitJob
-    // through one set of rules and cannot disagree about what is valid.
+    // Validate typed input and loaded files through the same CSV parser.
     private long[] parseInput(String text) {
         return CsvInputLoader.parse(text, (String) jobTypeBox.getSelectedItem());
     }
@@ -812,8 +803,7 @@ public class ClientApp extends JFrame {
         return result;
     }
 
-    // Validates and submits off the EDT, so a slow RPC cannot freeze the window.
-    // The coordinator splits the job across the cluster and calls back with the aggregate.
+    // Submit jobs off the Swing event thread; results arrive through the client callback.
     private void submitJob() {
         long[] values;
         String operation;
@@ -873,8 +863,7 @@ public class ClientApp extends JFrame {
 
                 // Discover the coordinator and retry submission if needed.
                 int coordinatorId = -1;
-                // Finding a leader is not acceptance; submitJob() may still throw.
-                // Track acceptance so exhausted retries report failure, not "Running".
+                // Finding a leader is not acceptance; submitJob() may still throw. Track acceptance so exhausted retries report failure, not "Running".
                 boolean accepted = false;
                 Exception lastError = null;
 

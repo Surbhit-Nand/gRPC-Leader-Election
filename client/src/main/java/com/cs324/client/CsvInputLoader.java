@@ -8,26 +8,22 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
-// Reads one or more CSV files into the single numeric payload a job needs.
-// Deliberately free of Swing, so the parsing rules can be tested headlessly.
+// Parse numeric CSV payloads independently of the Swing interface.
 public final class CsvInputLoader {
 
-    // Cap the combined size, not each file: the merged text is rendered in a text
-    // area and shipped as one payload, so multi-select must not raise the limit.
+    // Apply the size limit to the combined payload from all selected files.
     public static final long MAX_TOTAL_BYTES = 1_000_000L;
 
     private CsvInputLoader() {}
 
-    // One validation path for typed text and for loaded files, so a payload cannot
-    // pass one route and fail the other.
+    // One validation path for typed text and for loaded files, so a payload cannot pass one route and fail the other.
     public static long[] parse(String text, String operation) {
         long[] values = parseCells(text);
         applyShapeRules(values, operation);
         return values;
     }
 
-    // Reads every file, concatenates in filename order and validates the merged
-    // result, so the shape rules see the whole payload rather than each fragment.
+    // Merge files in filename order and validate the combined payload.
     public static long[] loadMerged(List<File> files, String operation) throws IOException {
         if (files == null || files.isEmpty()) {
             throw new IllegalArgumentException("Select at least one CSV file.");
@@ -83,8 +79,7 @@ public final class CsvInputLoader {
         return values;
     }
 
-    // Renders values back as CSV for the input area. Wrapping at 20 per line keeps a
-    // large load readable and re-parses identically, since rows may span lines.
+    // Wrap CSV output at 20 values per line without changing how it parses.
     public static String toCsv(long[] values) {
         StringBuilder text = new StringBuilder();
         for (int i = 0; i < values.length; i++) {
@@ -96,8 +91,7 @@ public final class CsvInputLoader {
         return text.toString();
     }
 
-    // Cell-level parsing shared by typed text and every file: bare comma-separated
-    // integers, so a quote means a real CSV dialect this loader does not accept.
+    // Accept bare comma-separated integers; quoted CSV fields are unsupported.
     private static long[] parseCells(String text) {
         String cleaned = text == null ? "" : text.strip();
 

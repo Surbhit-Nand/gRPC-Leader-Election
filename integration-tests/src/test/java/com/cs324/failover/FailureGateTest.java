@@ -8,10 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * The two rules that decide *when* the cluster acts: one election per failure, and one view per
- * term. Both are pure decisions, so both are tested without a cluster.
- */
+// Test failure suppression and leadership-view adoption independently of the network.
 class FailureGateTest {
 
     private final AtomicLong clock = new AtomicLong(1_000);
@@ -33,9 +30,7 @@ class FailureGateTest {
 
     @Test
     void theSameWorkerFailingAgainMuchLaterIsANewFailure() {
-        // The regression this guards: keying suppression on the coordinator id alone would make
-        // a second, unrelated death of the same worker id undetectable for ever, leaving the
-        // cluster with a dead coordinator and no election to replace it.
+        // A later failure of the same coordinator must be allowed after the suppression window expires.
         assertTrue(gate.shouldElect(4));
         clock.addAndGet(60_000);
         assertTrue(gate.shouldElect(4), "a death an hour later must still be able to elect");
@@ -55,7 +50,7 @@ class FailureGateTest {
     }
 }
 
-/** Whether a peer's reported view should replace ours. */
+// Whether a peer's reported view should replace ours.
 class LeaderViewTest {
 
     @Test
@@ -74,8 +69,7 @@ class LeaderViewTest {
 
     @Test
     void aPeerThatDisownsLeadershipAtTheSameTermIsFollowed() {
-        // The case the docs promise: we probe worker 4 believing it leads, and it says it is not
-        // the coordinator any more and names worker 6.
+        // The case the docs promise: we probe worker 4 believing it leads, and it says it is not the coordinator any more and names worker 6.
         LeaderView.Decision decision = LeaderView.decide(3, 4, 3, 6, false);
         assertTrue(decision.adopt());
         assertEquals(6, decision.coordinatorId());
@@ -96,8 +90,7 @@ class LeaderViewTest {
 
     @Test
     void aPeerClaimingLeadershipOverSomeoneElseAtTheSameTermIsNotFollowed() {
-        // Worker 8 claims it is the coordinator at our term, but names someone else as the
-        // leader. That is incoherent, so it must not overwrite a working belief.
+        // Reject a peer reply that claims leadership while naming another coordinator.
         assertFalse(LeaderView.decide(3, 4, 3, 6, true).adopt());
     }
 }

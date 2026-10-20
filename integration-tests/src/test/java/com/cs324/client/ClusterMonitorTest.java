@@ -15,12 +15,10 @@ import com.cs324.bootstrap.BootstrapRegistryImpl;
 import com.cs324.common.WorkerEvent;
 import com.cs324.common.WorkerControl;
 
-// Headless tests for the cluster-activity view: snapshot polling plus
-// transition-derived events, with map-backed worker views.
+// Headless tests for the cluster-activity view: snapshot polling plus transition-derived events, with map-backed worker views.
 class ClusterMonitorTest {
 
-    // Configurable stand-in: the shared FakeWorkerControl is fixed
-    // (empty neighbours, JAC 0), which cannot express rewirings or assignments.
+    // Configurable stand-in: the shared FakeWorkerControl is fixed (empty neighbours, JAC 0), which cannot express rewirings or assignments.
     static class ConfigurableWorker implements WorkerControl {
         int id;
         int jac;
@@ -67,8 +65,7 @@ class ClusterMonitorTest {
 
 
 
-    // Distinct unreachable ports: peer lookup fails with a transport error (no prune),
-    // so directory entries survive like in WorkerAutoRegistrationTest.
+    // Use unreachable endpoints to verify that failed probes preserve directory rows.
     private void register(int id, int port) throws Exception {
         bootstrap.registerWorker(id, "localhost", port);
     }

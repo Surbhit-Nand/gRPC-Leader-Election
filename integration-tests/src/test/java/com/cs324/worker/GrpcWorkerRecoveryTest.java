@@ -16,7 +16,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Recovery tests use actual TCP gRPC endpoints only. */
+// Recovery tests use actual TCP gRPC endpoints only.
 class GrpcWorkerRecoveryTest {
     private final ExecutorService pool = Executors.newFixedThreadPool(8);
     private final List<Server> servers = new ArrayList<>();

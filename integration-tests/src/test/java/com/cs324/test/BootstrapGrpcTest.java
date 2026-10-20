@@ -29,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-// Bootstrap discovery over gRPC: directory rules, monotonic ids,\r?\n// and the retained contact-port wire field. Real gRPC server on an ephemeral port.
+// Test directory rules, monotonic IDs and wire compatibility over a real gRPC server.
 class BootstrapGrpcTest {
 
     // Fixed contact-port metadata value; clear of other test classes.

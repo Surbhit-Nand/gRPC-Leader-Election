@@ -5,7 +5,7 @@ import com.cs324.worker.WorkerTaskCalculator;
 import java.util.Collection;
 import java.util.Locale;
 
-/** The shared job.proto is the only computation wire contract. */
+// The shared job.proto is the only computation wire contract.
 public final class ComputationCodec {
     private ComputationCodec() {}
 

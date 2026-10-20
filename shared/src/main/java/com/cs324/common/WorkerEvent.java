@@ -1,8 +1,6 @@
 package com.cs324.common;
 
-// One timestamped happening on a worker, kept in a small per-worker ring buffer
-// and polled by the GUI. Sequence numbers let the client fetch only what it
-// has not shown yet; clocks are the local machine's (single-host demo).
+// Sequenced worker events let the GUI fetch only new entries from a bounded buffer.
 public record WorkerEvent(long seq, int workerId, long epochMillis, String kind, String detail) {
 
     // Election wave originated here.

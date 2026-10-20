@@ -1,7 +1,6 @@
 package com.cs324.common;
 
-// Directory data. Network calls use host + grpcPort; contactPort is legacy metadata
-// retained only for wire compatibility and is never dialled.
+// Network calls use host and grpcPort; contactPort is unused compatibility metadata.
 public final class WorkerAddress {
     private final String host;
     private final int contactPort;

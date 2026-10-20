@@ -8,9 +8,7 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-// Guards the frozen gRPC contracts: service names, method names and the
-// progress service the team already ships. A rename or field-number edit
-// breaks this on purpose, forcing an explicit team decision first.
+// Guard service names, method names and protobuf field numbers against incompatible edits.
 class ProtoContractsTest {
 
     private static void assertMethods(String serviceName, ServiceDescriptor descriptor,

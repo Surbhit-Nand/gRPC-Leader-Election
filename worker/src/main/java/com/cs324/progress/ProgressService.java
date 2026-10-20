@@ -6,7 +6,7 @@ import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import java.util.*;
 
-/** Serializes snapshots and stream writes; retains the last 256 finished jobs. */
+// Serializes snapshots and stream writes; retains the last 256 finished jobs.
 public final class ProgressService extends JobProgressServiceGrpc.JobProgressServiceImplBase {
     private final Map<Integer, JobProgress> snapshots = new LinkedHashMap<>();
     private final Map<Integer, List<ServerCallStreamObserver<JobProgress>>> watchers = new HashMap<>();
@@ -18,7 +18,7 @@ public final class ProgressService extends JobProgressServiceGrpc.JobProgressSer
         snapshots.put(jobId, snapshot.build());
     }
 
-    /** Atomically move unfinished units during recovery without ending the stream. */
+    // Atomically move unfinished units during recovery without ending the stream.
     public synchronized void update(int jobId, Map<Integer, Long> totals, Map<Integer, Long> completed, Set<Integer> pending) {
         JobProgress.Builder next = JobProgress.newBuilder().setJobId(jobId);
         totals.forEach((id, total) -> next.addWorkers(WorkerProgress.newBuilder().setWorkerId(id).setTotalUnits(total)

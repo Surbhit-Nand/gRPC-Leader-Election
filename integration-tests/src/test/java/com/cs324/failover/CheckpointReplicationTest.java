@@ -54,8 +54,7 @@ class CheckpointReplicationTest {
             }
             assertEquals(17L, answer.get(5, TimeUnit.SECONDS));
             assertTrue(delivered.await(5, TimeUnit.SECONDS));
-            // Different outbound RPCs may arrive in any order. Reproduce worst-case
-            // ordering using actual messages emitted by the coordinator's sink.
+            // Different outbound RPCs may arrive in any order. Reproduce worst-case ordering using actual messages emitted by the coordinator's sink.
             List<ReplicateRequest> reverse = new ArrayList<>(pushes);
             reverse.sort(Comparator.comparingLong((ReplicateRequest r) -> r.getEntriesList().stream()
                     .mapToLong(CheckpointEntry::getSequence).max().orElse(0)).reversed());

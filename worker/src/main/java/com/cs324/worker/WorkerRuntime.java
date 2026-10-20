@@ -63,8 +63,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
     // Monotonic leadership generation carried by every election message.
     private final AtomicLong currentTerm = new AtomicLong(0);
 
-    // Coordinator failover (Member 2). The replica exists on every worker, not only on the
-    // coordinator, because the replica is what a survivor reads during a takeover.
+    // Every worker retains checkpoints so a survivor can restore jobs after coordinator failure.
     private final CheckpointLog checkpoints;
     private volatile CheckpointReplicator replicator;
     private volatile CoordinatorHealthMonitor healthMonitor;
@@ -77,8 +76,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
     // Lease bookkeeping: a leader may serve only while its last majority check is fresh.
     private final AtomicLong lastQuorumMillis = new AtomicLong(0);
     private final AtomicBoolean quorumHealthy = new AtomicBoolean(false);
-    // Set while a new coordinator merges and rebuilds; jobs are refused in that window so a
-    // client cannot start the same work twice, once here and once through recovery.
+    // Block admission during recovery to prevent accepting a job that is also being restored.
     private final AtomicBoolean failoverInProgress = new AtomicBoolean(false);
     // One election per detected failure; the gate holds the window and the key.
     private final FailureGate failureGate =
@@ -94,8 +92,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
                         if (grpcDirectory == null) throw new IllegalStateException("gRPC discovery is not configured");
                         return grpcDirectory.workers();
                     }, jobId -> {
-                        // Refuse while a takeover is rebuilding jobs, or the same work could be
-                        // accepted fresh here and resumed from the log a moment later.
+                        // Reject new jobs until checkpoint recovery finishes.
                         if (currentCoordinatorId != id || handoverInProgress.get() || failoverInProgress.get()) {
                             return false;
                         }
@@ -110,8 +107,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
                     .addService(new com.cs324.computation.WorkerControlService(this))
                     .addService(new ElectionGrpcService(this))
                     .addService(new FailoverGrpcService(this, id)).build().start();
-            // Remember the port: gRPC refuses getPort() once the server is down, and this is
-            // read by every dispatch and probe, including ones racing a shutdown.
+            // Cache the bound port because getPort() is unavailable after server shutdown.
             grpcPort = progressServer.getPort();
         }
     }
@@ -128,11 +124,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         System.out.println("Worker " + id + " gRPC jobs and progress on port " + getProgressPort());
     }
 
-    /**
-     * Starts the failover parts: replication out, health monitoring in, and the takeover that
-     * runs when this worker wins. Called once the directory is usable, because every one of
-     * them resolves peers through it.
-     */
+    // Start replication, health checks and recovery once peer discovery is available.
     private synchronized void startFailoverServices() {
         if (replicator != null) {
             return;
@@ -155,11 +147,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         startBootstrapLease();
     }
 
-    /**
-     * Keeps the bootstrap membership entry fresh even while the worker is idle. Without this,
-     * a crashed worker would only disappear when the bootstrap reaper ran, but a live worker
-     * would also expire unless registration happened to be repeated by some other subsystem.
-     */
+    // Refresh this worker membership lease even when it has no jobs.
     private synchronized void startBootstrapLease() {
         if (bootstrapLease != null) {
             return;
@@ -183,7 +171,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
                 TimeUnit.MILLISECONDS);
     }
 
-    /** Workers that have published a gRPC endpoint; these are the cluster's voting members. */
+    // Workers that have published a gRPC endpoint; these are the cluster's voting members.
     private Set<Integer> readyMemberIds() {
         Set<Integer> members = new java.util.HashSet<>();
         if (grpcDirectory != null) {
@@ -202,7 +190,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         quorumHealthy.set(true);
     }
 
-    /** A leader without a majority must stop serving, or a partitioned cluster has two of them. */
+    // A leader without a majority must stop serving, or a partitioned cluster has two of them.
     private synchronized void onQuorumLost() {
         quorumHealthy.set(false);
         lastQuorumMillis.set(0L);
@@ -226,7 +214,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         recordEvent(WorkerEvent.FAILOVER_DETAIL, message);
     }
 
-    /** Switches election hops to gRPC. Idempotent, so a re-published endpoint is harmless. */
+    // Switches election hops to gRPC. Idempotent, so a re-published endpoint is harmless.
     private synchronized void useGrpcElectionTransport(com.cs324.computation.RegistryClient directory) {
         ElectionTransport current = electionTransport;
         if (current instanceof GrpcElectionTransport) {
@@ -310,7 +298,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
     private volatile ClusterDirectory bootstrap;
     // Local host as published to peers; set once on join for repair reverse edges.
     private volatile String localHost;
-    // Client jobs served this term, reserved by CAS and never above JOBS_PER_TERM.
+    // Reserve term slots under the worker lock, up to JOBS_PER_TERM.
     private final AtomicInteger termJobsCoordinated = new AtomicInteger(0);
     private final Map<Integer, Long> termReservations = new HashMap<>();
     // Closed between winning a rotation and the next coordinator announcement.
@@ -366,9 +354,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         }
     }
 
-    // Clean-exit handoff: hands our neighbour set to every neighbour so survivors
-    // chain to a grandparent immediately. Best effort; crashes skip this entirely
-    // and rely on survivor-side failure detection instead.
+    // On graceful exit, give neighbours the links needed to reconnect; crashes rely on failure detection.
     public int notifyNeighboursOfLeaving() {
         Set<Integer> mine = Set.copyOf(neighbours.keySet());
         int notified = 0;
@@ -437,7 +423,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         return messageId;
     }
 
-    /** gRPC wave hop; the algorithm below is the one place the protocol lives. */
+    // gRPC wave hop; the algorithm below is the one place the protocol lives.
     @Override
     public void onElectionMessage(ElectionMessage message) {
         applyElectionMessage(message.getOriginId(), message.getCandidateId(), message.getCandidateJac(),
@@ -447,8 +433,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
     // Folds an incoming wave in: we win on lower JAC, then on higher id.
     private void applyElectionMessage(int originId, int candidateId, int candidateJac, long messageId, long term,
             List<Integer> incomingVoters) {
-        // A hop below our own term belongs to a superseded wave; answering it would only
-        // revive a coordinator the cluster has already moved past.
+        // A hop below our own term belongs to a superseded wave; answering it would only revive a coordinator the cluster has already moved past.
         if (term > 0 && term < currentTerm.get()) {
             return;
         }
@@ -535,7 +520,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         }
     }
 
-    /** gRPC announcement hop. */
+    // gRPC announcement hop.
     @Override
     public void onCoordinatorAnnouncement(CoordinatorAnnouncement announcement) {
         applyCoordinatorAnnouncement(announcement.getCoordinatorId(), announcement.getMessageId(),
@@ -560,7 +545,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         }
     }
 
-    /** Apply only a newer (term, coordinator ID) leadership view. */
+    // Apply only a newer (term, coordinator ID) leadership view.
     private synchronized boolean acceptLeadership(int coordinatorId, long term, String cause) {
         if (term <= 0) return false;
         {
@@ -581,8 +566,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         if (coordinatorId == this.id) {
             termJobsCoordinated.set(0);
             termReservations.clear();
-            // An election proved the majority, and a late join adopts a view it can verify;
-            // the quorum monitor renews this short lease and revokes it on a partition.
+            // Start a short quorum lease after election; the quorum monitor renews or revokes it.
             quorumHealthy.set(true);
             lastQuorumMillis.set(System.currentTimeMillis());
         }
@@ -597,7 +581,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         return true;
     }
 
-    /** gRPC echo hop. */
+    // gRPC echo hop.
     @Override
     public void onEchoMessage(EchoMessage message) {
         applyEchoMessage(message.getMessageId(), message.getFromWorkerId(), message.getBestCandidateId(),
@@ -623,8 +607,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
                     election.bestCandidateJac = bestCandidateJac;
                 }
             }
-            // The root announces above every term the wave saw, so its verdict cannot be
-            // mistaken for one of the older waves still echoing back.
+            // The root announces above every term the wave saw, so its verdict cannot be mistaken for one of the older waves still echoing back.
             election.maxTerm = Math.max(election.maxTerm, term);
             election.voters.addAll(incomingVoters);
             election.voters.add(WorkerRuntime.this.id);
@@ -721,7 +704,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
     }
 
     @Override
-    // Graceful-leave fast path: chain to a grandparent now instead of waiting for a probe to fail.
+    // Give neighbours this worker links so they can reconnect after a graceful exit.
     public void notifyLeaving(int leaverId, Set<Integer> leaverNeighbours) {
         if (leaverNeighbours != null) {
             twoHop.put(leaverId, Set.copyOf(leaverNeighbours));
@@ -745,8 +728,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         }
     }
 
-    // Survivor-side repair: prune the dead edge, then chain to one grandparent (smallest id first).
-    // Falls back to any live Bootstrap peer when no grandparent is known or reachable.
+    // Replace a dead edge with a reachable grandparent, falling back to a directory peer.
     void handleDeadNeighbour(int deadId) {
         handleDeadNeighbour(deadId, "unreachable");
     }
@@ -860,8 +842,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
     private void maybeRotateCoordinator() {
         synchronized (this) {
             if (termJobsCoordinated.get() < Constants.JOBS_PER_TERM || handoverInProgress.get()) return;
-            // Share the reservation lock: there must be no window between resetting
-            // the budget and closing admission in which another job can claim a slot.
+            // Reset the budget and close admission under the same lock to prevent an extra reservation.
             handoverInProgress.set(true);
             termJobsCoordinated.set(0);
         }
@@ -875,7 +856,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         this.localHost = localHost;
     }
 
-    /** This worker's own leadership view, sent as the reply to a follower probing it. */
+    // This worker's own leadership view, sent as the reply to a follower probing it.
     @Override
     public HeartbeatReply heartbeat(int fromWorkerId, long followerTerm, int followerCoordinatorId) {
         return HeartbeatReply.newBuilder()
@@ -885,7 +866,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
                 .build();
     }
 
-    /** Folds entries a coordinator replicated to us; the sequence and term rules do the work. */
+    // Folds entries a coordinator replicated to us; the sequence and term rules do the work.
     @Override
     public long acceptEntries(int coordinatorId, long term, List<CheckpointEntry> entries) {
         long highest = 0L;
@@ -893,8 +874,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
             if (checkpoints.apply(entry)) {
                 highest = Math.max(highest, entry.getSequence());
             } else {
-                // Duplicate or stale: acknowledging it is still correct, because the replica
-                // already holds that state and the sender must not resend it forever.
+                // Acknowledge already-stored state so the sender does not retry duplicate entries.
                 highest = Math.max(highest, checkpoints.job(entry.getJobId()) == null
                         ? 0L : checkpoints.job(entry.getJobId()).sequence());
             }
@@ -902,7 +882,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         return highest;
     }
 
-    /** Include retained terminal markers so a stale survivor never resurrects a finished job. */
+    // Include retained terminal markers so a stale survivor never resurrects a finished job.
     @Override
     public List<CheckpointEntry> snapshots() {
         List<CheckpointEntry> entries = new ArrayList<>();
@@ -912,20 +892,12 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         return entries;
     }
 
-    /** The local replica, for tests and for the takeover's own merge. */
+    // The local replica, for tests and for the takeover's own merge.
     public CheckpointLog checkpointLog() {
         return checkpoints;
     }
 
-    /**
-     * Reacts to a coordinator this worker has decided is FAILED: one wave per failure, jittered.
-     *
-     * <p>The suppression is keyed on (coordinator, when) rather than on a wave counter, because
-     * the whole point is that several workers notice the same death within a few hundred
-     * milliseconds of each other and must not each start their own. Keying on the coordinator
-     * id alone would be wrong in the other direction: the same worker failing again much later
-     * is a new failure and must still be able to elect.
-     */
+    // Suppress repeated local failure elections and add jitter before starting a wave.
     private void requestFailoverElection(int failedCoordinator) {
         if (!failureGate.shouldElect(failedCoordinator)) {
             return;
@@ -945,12 +917,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         startElection();
     }
 
-/**
-     * Acts on a heartbeat reply that contradicts this worker's leadership view: either the peer
-     * reports a newer term, or it says it is not the coordinator any more. Both mean the cluster
-     * has already moved on, so the view is adopted instead of starting an election nobody needs.
-     * That is also what makes a deposed coordinator step down instead of serving a lost term.
-     */
+// Adopt a newer heartbeat view and step down if this worker no longer leads.
     private void observeLeadershipDrift(CoordinatorHealthMonitor.ProbeResult view) {
         long peerTerm = view.term() == null ? 0L : view.term();
         LeaderView.Decision decision = LeaderView.decide(currentTerm.get(), currentCoordinatorId,
@@ -966,11 +933,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         }
     }
 
-    /**
-     * Runs when this worker becomes coordinator: merge every reachable replica, then rebuild
-     * the jobs whose owner died. Idempotent per job and term, and guarded so no new job is
-     * accepted while the merge is in flight.
-     */
+    // Block new submissions while the new coordinator merges replicas and restores orphaned jobs.
     private void takeOverLeadership() {
         if (failover == null) {
             return;
@@ -992,12 +955,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         }
     }
 
-    /**
-     * Writes this coordinator's job transitions into the local replica and out to the peers.
-     *
-     * <p>Acceptance is the only entry that waits for a peer, because that is the one the client
-     * acknowledgement depends on; everything else is best effort and asynchronous.
-     */
+    // Record transitions locally and on peers; only acceptance waits for a confirmed replica.
     private final class ReplicatingCheckpointSink implements CheckpointSink {
 
         @Override
@@ -1047,8 +1005,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
                         .withDescription("Checkpoint replication is not ready").asRuntimeException();
                 return;
             }
-            // Independent asynchronous RPCs may overtake one another. Every push
-            // carries cumulative state, so a newer sequence subsumes older updates.
+            // Send cumulative snapshots so newer updates remain complete if RPCs arrive out of order.
             boolean confirmed = active.replicate(snapshot, entry.getTerm(), waitForPeer);
             if (waitForPeer && !confirmed) throw io.grpc.Status.UNAVAILABLE
                     .withDescription("Job acceptance is unconfirmed: retry the same job ID when a replica is available")

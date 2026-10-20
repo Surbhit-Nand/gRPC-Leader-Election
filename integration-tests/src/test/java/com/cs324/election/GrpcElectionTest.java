@@ -33,20 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
-/**
- * Election over real TCP gRPC endpoints.
- *
- * <p>The topology is wired the way production wires it - through gRPC control peer links -
- * and then discovery is stopped before any election runs. Convergence after that point is
- * only possible if every wave hop, echo and announcement travelled over
- * {@code ElectionService}.
- *
- * <p>Each worker's published endpoint is a second listener that hosts the same
- * {@link ElectionHandler} behind a counting interceptor, so "a duplicate is answered, not
- * dropped" is observed on the wire rather than inferred from a converged coordinator. The
- * directory is told about that port with the ordinary {@code RegistryService} update, which
- * is the same call a worker makes for its own endpoint.
- */
+// Exercise election waves, echoes and announcements over real gRPC endpoints with observable echo counts.
 class GrpcElectionTest {
 
     private static final String HOST = "localhost";
@@ -76,7 +63,7 @@ class GrpcElectionTest {
         registryChannel = ManagedChannelBuilder.forAddress(HOST, bootstrapPort).usePlaintext().build();
     }
 
-    /** Builds a worker, then publishes an observable endpoint that counts inbound echo RPCs. */
+    // Builds a worker, then publishes an observable endpoint that counts inbound echo RPCs.
     private WorkerRuntime addWorker(int id) throws Exception {
         WorkerRuntime worker = new WorkerRuntime(id);
         workers.put(id, worker);
@@ -88,19 +75,17 @@ class GrpcElectionTest {
         servers.add(server);
         endpoints.put(id, server);
 
-        // Identity first, then the endpoint: the directory only accepts an update for a
-        // worker it already knows, which is the order a real startup uses.
+        // Register the worker identity before publishing its listener endpoint.
         RegistryServiceGrpc.RegistryServiceBlockingStub registry = RegistryServiceGrpc
                 .newBlockingStub(registryChannel).withDeadlineAfter(5, TimeUnit.SECONDS);
         registry.register(RegisterRequest.newBuilder().setWorkerId(id).setHost(HOST).setPort(0).build());
         worker.enableGrpcJobs(HOST, bootstrapPort, HOST, 0);
-        // The observable listener takes over as the published endpoint, so the wave and every
-        // echo resolve here. Discovery stays the ordinary registry lookup either way.
+        // Publish the counting listener so all election messages pass through it.
         discovery.publish(id, HOST, 0, server.getPort());
         return worker;
     }
 
-    /** Wraps the worker's election service, counting the inbound echo RPCs. */
+    // Wraps the worker's election service, counting the inbound echo RPCs.
     private Server countingServer(WorkerRuntime worker, AtomicInteger echoCount) throws Exception {
         ServerInterceptor counter = new ServerInterceptor() {
             @Override
@@ -122,7 +107,7 @@ class GrpcElectionTest {
         workers.get(fromId).connectAsNeighbour(toId, HOST, 0);
     }
 
-    /** 1-2-3: no cycle, so convergence cannot lean on duplicate suppression. */
+    // 1-2-3: no cycle, so convergence cannot lean on duplicate suppression.
     private void wireChain() throws Exception {
         connect(1, 2);
         connect(2, 1);
@@ -130,14 +115,14 @@ class GrpcElectionTest {
         connect(3, 2);
     }
 
-    /** 1-2-3-1: the smallest cyclic shape, so each hop can meet the same wave twice. */
+    // 1-2-3-1: the smallest cyclic shape, so each hop can meet the same wave twice.
     private void wireTriangle() throws Exception {
         wireChain();
         connect(3, 1);
         connect(1, 3);
     }
 
-    /** Closes the peer links, leaving gRPC as the only way a wave can travel. */
+    // Closes the peer links, leaving gRPC as the only way a wave can travel.
 
 
     private static void seedJobAllocationCounter(WorkerRuntime worker, int value) throws Exception {
@@ -235,8 +220,7 @@ class GrpcElectionTest {
         workers.get(3).startElection();
         awaitNoCoordinator(1, 2, 3, 4);
 
-        // Heal the partition and run a fresh wave across every node. The higher id wins
-        // the JAC tie, and the announcement carries a term above both old waves.
+        // After reconnecting, elect the higher-ID tied candidate in a term newer than both old waves.
         connect(2, 3);
         connect(3, 2);
         workers.get(1).startElection();
@@ -301,8 +285,7 @@ class GrpcElectionTest {
         long waveId = first.startElection();
         awaitAgreement(3, 1, 2, 3);
 
-        // Replay exactly the wave worker 1 already sent, claiming worker 2 as the parent:
-        // the duplicate path must answer with an echo and stop there.
+        // Replay an existing wave and verify that the duplicate gets an echo without being forwarded.
         int echoesBefore = echoCounts.get(2).get();
         ManagedChannel channel = ManagedChannelBuilder
                 .forAddress(HOST, endpoints.get(1).getPort()).usePlaintext().build();
@@ -331,8 +314,7 @@ class GrpcElectionTest {
         wireChain();
 
 
-        // Worker 3 disappears before the wave reaches it. Its endpoint stays published, so the
-        // wave has to fail on the hop rather than wait for an echo that can never arrive.
+        // Leave the crashed worker registered so the failed RPC tests election edge repair.
         Server third = endpoints.get(3);
         third.shutdownNow();
         assertTrue(third.awaitTermination(5, TimeUnit.SECONDS));
