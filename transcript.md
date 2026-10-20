@@ -1,7 +1,7 @@
 # Part 2 — Leader election and duplicate handling
 
 Updated for the gRPC-only module layout, 20 October 2026.
-Open `worker/src/main/java/com/cs324/worker/WorkerRemoteImpl.java`.
+Open `worker/src/main/java/com/cs324/worker/WorkerRuntime.java`.
 Use method names when navigating: line numbers change as the implementation evolves.
 This section takes about five minutes.
 
@@ -52,6 +52,10 @@ This section takes about five minutes.
 > “The map claims each wave atomically, so concurrent receivers cannot create
 > two independent states for one wave. If we have seen it before, we read the
 > best candidate already known and send an echo back. We do not forward it again.”
+
+The map keeps a bounded window of recent waves; retained state is enough for
+duplicate suppression during a normal election, without growing for the lifetime
+of the worker.
 
 > “We must answer rather than silently drop the duplicate. In a triangle, a wave
 > can arrive through two paths. A sender retires its pending child only when it

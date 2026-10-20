@@ -3,7 +3,7 @@
 #
 # Usage (one terminal per node, project root):
 #   .\run.ps1 build                              # package modules + copy runtime jars (skips test execution)
-#   .\run.ps1 bootstrap [grpcPort]                   # default 50051
+#   .\run.ps1 bootstrap [grpcPort] [--state-file path] # default 50051
 #   .\run.ps1 worker [host] [grpcPort]               # default localhost 50051
 #   .\run.ps1 client [host] [callbackPort] [grpcPort] # default localhost 1199 50051
 $ErrorActionPreference = "Stop"
@@ -38,8 +38,8 @@ switch ($command) {
         Write-Host "Build OK. Launch nodes with .\run.ps1 bootstrap|worker|client"
     }
     "bootstrap" {
-        $port = if ($args.Count -ge 2) { $args[1] } else { "50051" }
-        & java -cp (Get-Classpath "bootstrap") com.cs324.bootstrap.BootstrapNode $port
+        $bootstrapArgs = if ($args.Count -ge 2) { $args[1..($args.Count - 1)] } else { @("50051") }
+        & java -cp (Get-Classpath "bootstrap") com.cs324.bootstrap.BootstrapNode @bootstrapArgs
     }
     "worker" {
         $hostArg = if ($args.Count -ge 2) { $args[1] } else { "localhost" }
@@ -53,6 +53,6 @@ switch ($command) {
         & java -cp (Get-Classpath "client") com.cs324.client.ClientApp $hostArg $callbackArg $grpcArg
     }
     default {
-        Write-Host "Usage: .\run.ps1 build | bootstrap [grpcPort] | worker [host] [grpcPort] | client [host] [callbackPort] [grpcPort]"
+        Write-Host "Usage: .\run.ps1 build | bootstrap [grpcPort] [--state-file path] | worker [host] [grpcPort] | client [host] [callbackPort] [grpcPort]"
     }
 }

@@ -72,6 +72,9 @@ new sequence numbers. Finished state has bounded retention.
 - Callback acknowledgements can be lost. The client must deduplicate by job ID;
   transport delivery is not globally exactly once.
 - Bootstrap itself is a single in-memory directory and has no failover replica.
+  Membership entries expire after a 15-second lease, and its ID counters are
+  persisted in `bootstrap-state.properties` so a restart does not immediately
+  reuse an identity. Active membership is still not persisted.
 
 ## Verification and demo
 

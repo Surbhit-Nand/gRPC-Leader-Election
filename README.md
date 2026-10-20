@@ -105,12 +105,15 @@ runtime classpath; use the appropriate application directory.
 
 | Application | Arguments | Defaults |
 | --- | --- | --- |
-| Bootstrap | `[grpcPort]` | `50051` |
+| Bootstrap | `[grpcPort] [--state-file path]` | `50051`, `bootstrap-state.properties` |
 | Worker | `[bootstrapHost] [bootstrapGrpcPort] [--grpc-port N]` | `localhost 50051` |
 | Client | `[bootstrapHost] [callbackPort] [bootstrapGrpcPort]` | `localhost 1199 50051` |
 
 Workers receive monotonic IDs from bootstrap and bind available gRPC ports
 automatically. `--grpc-port` overrides the worker's positional bootstrap port.
+The bootstrap writes its worker/job counters to `bootstrap-state.properties`
+(git-ignored) so a restart does not immediately reuse an ID. Use `--state-file`
+to keep that file somewhere else, or set `-Dbootstrap.state.file=...`.
 
 For a second client, use a different callback port:
 
@@ -207,15 +210,21 @@ starts actual worker JVMs, joins them through gRPC, kills the coordinator during
 a job, and checks the recovered answer and completed progress. Other tests cover
 stream reconnects, worker failure, late joins, stale results, duplicate submissions,
 term rotation, topology repair, checkpoint ordering, acceptance failures,
-minority-partition quorum safety, leader step-down and the absence of RMI imports
-or supertypes.
+minority-partition quorum safety, leader step-down, bootstrap lease expiry,
+persistent ID counters, bounded retention and the absence of RMI imports or
+supertypes. `.github/workflows/verify.yml` runs the same `mvn verify` build on JDK
+25 and publishes Surefire reports plus JaCoCo coverage for each module.
 
 For a manual demonstration, run bootstrap, four workers and a client. Submit a
 PRIMESUM range large enough to stay active, then terminate either a participating
 worker or the coordinator. Observe reassignment/election in the event feed, the
 reconnecting progress breakdown and the final result. Restart the departed worker
-to demonstrate a late join. Bootstrap IDs are not reused until bootstrap restarts;
-restart all workers when resetting bootstrap.
+to demonstrate a late join. Active membership is in memory: after a bootstrap
+restart, workers must re-register, and because their old entries are gone, restart
+all workers before reusing the cluster. The persisted state file preserves the ID
+counters across a bootstrap restart; delete it only with a full cluster reset.
+Bootstrap removes a worker whose lease has not been refreshed for 15 seconds, so
+a crashed process cannot keep inflating the quorum denominator.
 
 ## Troubleshooting
 

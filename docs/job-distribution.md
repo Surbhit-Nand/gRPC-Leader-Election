@@ -48,6 +48,10 @@ Interrupted subscriptions retry with bounded delays. They rediscover published
 workers and locate the job's new owner after coordinator failure without submitting
 the job again. Reassignment preserves units already completed by an affected worker.
 
+Submission and task-deduplication maps are bounded (1024 jobs and 4096 task
+attempts). This keeps a long-lived coordinator's memory predictable; a duplicate
+submission older than that retention window may be treated as new work.
+
 ## Verification
 
 ```text
