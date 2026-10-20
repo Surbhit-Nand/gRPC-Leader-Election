@@ -1,0 +1,97 @@
+* bb2090e 2026-10-20 Alvin Kumar	feat(grpc): modularize cluster and enforce quorum leadership
+*   ef19cda 2026-10-20 Surbhit Nand	Merge origin/main into main
+|\  
+| *   a394a6f 2026-10-19 Alvin Kumar	Merge pull request #2 from Surbhit-Nand/test-branch
+| |\  
+| | * 1967d87 2026-10-19 Alvin Kumar	fix(progress): reconnect streams and rediscover recovered jobs
+| | * 96735e5 2026-10-19 Alvin Kumar	fix(failover): replicate cumulative state across reordered RPCs
+| | * d120f58 2026-10-19 Alvin Kumar	fix(failover): share delivered tombstones during takeover
+| | * be5d6b5 2026-10-19 Alvin Kumar	fix(failover): preserve checkpoint sequences when taking snapshots
+| | * 7beb1b7 2026-10-19 Alvin Kumar	fix(grpc): migrate executable peer links and monitoring off RMI
+| | * c192621 2026-10-19 Alvin Kumar	fix(progress): retain completed units when remaining work fails
+| | * b04be46 2026-10-19 Alvin Kumar	fix(failover): acknowledge replay only after client delivery
+| | * 668da09 2026-10-19 Alvin Kumar	fix(failover): replay the saved final job result
+| | * 59164a3 2026-10-19 Alvin Kumar	fix(failover): finish recovered jobs with completed slices
+| | * c441442 2026-10-18 Aryan Sewak	Fix two defects found reviewing the failover, and test the rules directly
+| | * 4924f4f 2026-10-18 Aryan Sewak	Name the remaining failover event kinds and refresh the test count
+| | * 5dd93d8 2026-10-18 Aryan Sewak	Document election over gRPC and coordinator failover
+| | * f3fa15b 2026-10-18 Aryan Sewak	Test coordinator failover end to end and harden what it exposed
+| | * 92fa42a 2026-10-18 Aryan Sewak	Wire failover into the worker: replicate, detect, take over
+| | * 58a4bda 2026-10-18 Aryan Sewak	Give failover a replication seam, a restore entry point and reassignment fix
+| | * 9474df3 2026-10-18 Aryan Sewak	Detect coordinator failure with an alive/suspect/failed rule
+| | * 5f6a3ca 2026-10-18 Aryan Sewak	Add the failover contract and the replicated job log
+| | * 4c07dce 2026-10-18 Aryan Sewak	Cover the gRPC election with real TCP tests and document it
+| | * be400c8 2026-10-18 Aryan Sewak	Run the election wave over gRPC behind a transport seam
+| | * ad31f2c 2026-10-18 Aryan Sewak	Add additive term fields to the election contract
+| |/  
+* | f96a490 2026-10-18 Surbhit Nand	Register generated protobuf sources with build-helper for m2e
+* | 1607bc1 2026-10-18 Surbhit Nand	Resolve os.detected.classifier in m2e via os-maven-plugin lifecycle binding
+* | fca5ba7 2026-10-18 Surbhit Nand	Bump gRPC to 1.85.0 and drop unreachable catch in BootstrapGrpcService
+|/  
+* 90457c2 2026-10-17 Whynot-hub	Document worker failure recovery and GUI system log in README
+*   4b82e1b 2026-10-17 Whynot-hub	Merge worker-failure-recovery into main
+|\  
+| * 881a8c0 2026-10-17 Whynot-hub	Implement gRPC worker failure recovery and colored GUI system log
+|/  
+*   b1e2463 2026-10-16 Whynot-hub	Merge job distribution gRPC integration into main
+|\  
+| * 5db4812 2026-10-16 Whynot-hub	Integrate job distribution with shared gRPC services and bootstrap discovery
+| *   93d45d5 2026-10-16 Whynot-hub	Merge remote-tracking branch 'origin/main' into job-distribution
+| |\  
+| |/  
+|/|   
+* | 7fbc9f5 2026-10-16 Whynot-hub	Refresh client workspace styling and add View actions
+* |   884a66f 2026-10-16 Surbhit Nand	Merge docs/run-instructions: run.ps1 first in How to Run
+|\ \  
+| * | 57f6acc 2026-10-16 Surbhit Nand	Lead How to Run with run.ps1, mark java commands equivalent
+|/ /  
+* |   8c11cc9 2026-10-16 Surbhit Nand	Merge origin/main (PR #1: bootstrap-grpc with review cleanup)
+|\ \  
+| * \   c41c820 2026-10-16 Surbhit Nand	Merge pull request #1 from Surbhit-Nand/feature/bootstrap-grpc
+| |\ \  
+| | * | fe8c26a 2026-10-16 Surbhit Nand	Cleanup: imports, explicit types, dedupe record construction
+* | | |   9865115 2026-10-16 Surbhit Nand	Merge docs/grpc-readme: gRPC contracts, migration status, test count
+|\ \ \ \  
+| |/ / /  
+|/| | |   
+| * | | 4236476 2026-10-16 Surbhit Nand	Document gRPC contracts, migration status and test count
+|/ / /  
+* | | 6b260a7 2026-10-16 Surbhit Nand	Merge feature/bootstrap-grpc: dual-stack Bootstrap discovery over gRPC
+|\| | 
+| * |   fc27309 2026-10-16 Surbhit Nand	Merge main (contracts) into feature/bootstrap-grpc
+| |\ \  
+| |/ /  
+|/| |   
+* | |   d17337a 2026-10-16 Surbhit Nand	Merge feature/grpc-contracts: frozen gRPC contracts for registry, election and jobs
+|\ \ \  
+| | * | e860c8a 2026-10-16 Surbhit Nand	Review cleanup: drop dead local, fix import wrap
+| | * | 17b41d5 2026-10-16 Surbhit Nand	Dual-stack Bootstrap discovery over gRPC
+| |/ /  
+| * / aa7ce21 2026-10-16 Surbhit Nand	Freeze gRPC contracts for registry, election and jobs
+|/ /  
+* |   1f3b5c6 2026-10-16 Surbhit Nand	Merge refactor/run-script: launcher and gRPC classpath docs
+|\ \  
+| * | 8a6ff4a 2026-10-16 Surbhit Nand	Add run.ps1 launcher and document the gRPC classpath
+|/ /  
+| * 3812a59 2026-10-16 Whynot-hub	Add independent gRPC job distribution and standalone demo
+|/  
+* 8d1a510 2026-10-15 Whynot-hub	Add gRPC job progress streaming and improve client history and scrolling
+*   b0b650f 2026-10-15 Surbhit Nand	Merge refactor/range-warning-1b: warn-but-allow for wide PRIMESUM ranges up to 1B
+|\  
+| * 9163995 2026-10-15 Surbhit Nand	Warn-but-allow for wide PRIMESUM ranges up to 1B
+|/  
+*   5f60d97 2026-10-15 Surbhit Nand	Merge refactor/cluster-activity-events: cluster activity card with worker event logs
+|\  
+| * f17f447 2026-10-15 Surbhit Nand	Cluster activity card with worker event logs
+|/  
+*   b8ec1a3 2026-10-15 Surbhit Nand	Merge refactor/worker-auto-assign-rewire: auto worker ids/ports and partition-healing rewire
+|\  
+| * e097c6e 2026-10-15 Surbhit Nand	Auto-assign worker ids and ports plus partition-healing rewire
+|/  
+* 94d74b7 2026-10-13 Surbhit Nand	Update readme file
+* 01cb0ed 2026-10-13 Surbhit Nand	Docs: follow repo rename to gRPC-Leader-Election
+* f160800 2026-10-13 Surbhit Nand	Docs: point clone URL to Surbhit-Nand/CS324_A2
+* eb43999 2026-10-13 Surbhit Nand	Import leader-election-algorithm as initial commit
+* 83b74bc 2026-10-18 Surbhit Nand	Agent host session eb74ae47-3da9-4bfb-bcf9-733bda3bab6f - turn 1
+* 8936431 2026-10-18 Surbhit Nand	Agent host session eb74ae47-3da9-4bfb-bcf9-733bda3bab6f - turn 1 start
+* 9d76162 2026-10-18 Surbhit Nand	Agent host session eb74ae47-3da9-4bfb-bcf9-733bda3bab6f - baseline checkpoint
