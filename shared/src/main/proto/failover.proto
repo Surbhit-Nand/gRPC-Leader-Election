@@ -61,6 +61,14 @@ message JobFinished {
   bool delivered = 2;
 }
 
+// The job changed hands: the coordinator that rebuilt it owns it from now on.
+message JobClaimed {
+  // The worker that owns the job from now on.
+  int32 coordinator_id = 1;
+  // The term in which it took ownership; a newer term supersedes an older claim.
+  int64 term = 2;
+}
+
 // Per-job sequence numbers reject duplicate and out-of-order checkpoint entries.
 message CheckpointEntry {
   int32 job_id = 1;
@@ -72,6 +80,7 @@ message CheckpointEntry {
     JobAccepted accepted = 5;
     SliceUpdated slice = 6;
     JobFinished finished = 7;
+    JobClaimed claimed = 8;
   }
 }
 

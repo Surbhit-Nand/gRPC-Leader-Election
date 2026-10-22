@@ -214,6 +214,18 @@ private Object awaitResult(int jobId) throws Exception {
                 + " within " + boundMillis + "ms; last views: " + views + "\n  recent events:" + events);
     }
 
+    // Every event of every worker, for failure diagnosis.
+    private String clusterFeed() {
+        StringBuilder feed = new StringBuilder();
+        for (var entry : workers.entrySet()) {
+            feed.append("--- w").append(entry.getKey()).append(" ---\n");
+            for (com.cs324.common.WorkerEvent event : entry.getValue().getRecentEvents(0)) {
+                feed.append(event.kind()).append(' ').append(event.detail()).append('\n');
+            }
+        }
+        return feed.toString();
+    }
+
     // What every worker currently believes, for failure messages.
     private String clusterState() {
         StringBuilder state = new StringBuilder();
@@ -369,7 +381,16 @@ Object recovered = awaitResult(jobId);
                 "the recovered job must produce the exact answer for its input");
         // Count successful callbacks separately from errors emitted during an in-JVM shutdown.
         assertEquals(1, answersDelivered(jobId),
-                "the client must be called back exactly once for the failed job");
+                () -> "the client must be called back exactly once for the failed job; feed:\n" + clusterFeed());
+        // One coordinator rebuilds the job and owns it, so no survivor rebuilds it in parallel.
+        long rebuilds = workers.values().stream()
+                .flatMap(worker -> worker.getRecentEvents(0).stream())
+                .filter(event -> event.detail().contains("Job " + jobId + " restored on coordinator"))
+                .count();
+        assertEquals(1, rebuilds, () -> "only one coordinator may rebuild the failed job; feed:\n" + clusterFeed());
+        assertNotNull(workers.get(second).checkpointLog().job(jobId));
+        assertNotEquals(first, workers.get(second).checkpointLog().job(jobId).acceptedBy(),
+                "the recovered job is no longer owned by the crashed coordinator");
         assertTrue(rejectedAnswers.getOrDefault(jobId, List.of()).size() <= 1,
                 "a dying coordinator may report its own failure at most once");
 

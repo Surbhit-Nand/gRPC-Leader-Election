@@ -211,6 +211,38 @@ class CheckpointLogTest {
     }
 
     @Test
+    void aClaimHandsTheJobToTheCoordinatorThatRebuiltIt() {
+        CheckpointLog log = logWithAcceptedJob(7, 1);
+        assertEquals(1, log.job(7).acceptedBy(), "the accepting coordinator owns the job");
+
+        assertTrue(log.apply(log.claimEntry(7, 5, TERM_TWO)));
+        assertEquals(5, log.job(7).acceptedBy(), "the takeover owns the job it rebuilt");
+        assertEquals(2L, log.job(7).ownerTerm());
+
+        // An older takeover cannot take the job back from the newer owner.
+        assertFalse(log.apply(log.claimEntry(7, 6, TERM_ONE)), "an older term changes nothing");
+        assertEquals(5, log.job(7).acceptedBy(), "an older term cannot steal the job");
+    }
+
+    @Test
+    void aSnapshotTellsTheNextReplicaWhoOwnsTheJob() {
+        CheckpointLog source = logWithAcceptedJob(7, 1);
+        source.apply(source.claimEntry(7, 5, TERM_TWO));
+
+        CheckpointLog replica = new CheckpointLog(4);
+        source.snapshot(7).forEach(entry -> assertTrue(replica.apply(entry)));
+        assertEquals(5, replica.job(7).acceptedBy(), "a survivor learns that the job was already rebuilt");
+        assertEquals(2L, replica.job(7).ownerTerm());
+    }
+
+    @Test
+    void aClaimForAnUnknownJobIsDroppedBecauseThereIsNothingToOwn() {
+        CheckpointLog log = new CheckpointLog(9);
+        assertNull(log.claimEntry(42, 5, TERM_TWO), "there is no job to claim");
+        assertNull(log.job(42));
+    }
+
+    @Test
     void entriesWithoutARequestOrPayloadShapeAreRejected() {
         CheckpointLog log = new CheckpointLog(9);
         assertFalse(log.apply(CheckpointEntry.getDefaultInstance()), "an empty entry changes nothing");

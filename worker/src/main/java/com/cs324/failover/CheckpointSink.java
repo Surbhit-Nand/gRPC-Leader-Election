@@ -25,6 +25,14 @@ public interface CheckpointSink {
     // The client callback failed. A survivor may replay it, so the tombstone records that.
     default void onDeliveryFailed(int jobId) {}
 
+    // This worker took a recovered job over, so replicas must stop rebuilding it.
+    default void onOwnershipClaimed(int jobId) {}
+
+    // Whether this worker still owns the job; a newer takeover takes it away.
+    default boolean ownsJob(int jobId) {
+        return true;
+    }
+
     // One slice as it was accepted: identity, input, owner and attempt.
     record SliceSnapshot(int taskId, TaskPayload input, WorkerEndpoint owner, int attempt) {}
 

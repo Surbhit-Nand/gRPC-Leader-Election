@@ -154,6 +154,15 @@ class GrpcElectionTest {
                 + "ms over gRPC. Got:" + state);
     }
 
+    // The recent happenings of one worker, for failure messages.
+    private String feed(int workerId) {
+        StringBuilder feed = new StringBuilder();
+        for (com.cs324.common.WorkerEvent event : workers.get(workerId).getRecentEvents(0)) {
+            feed.append(event.kind()).append(' ').append(event.detail()).append('\n');
+        }
+        return feed.toString();
+    }
+
     private void awaitNoCoordinator(int... participants) throws Exception {
         long deadline = System.currentTimeMillis() + CONVERGENCE_TIMEOUT_MS;
         while (System.currentTimeMillis() < deadline) {
@@ -254,7 +263,7 @@ class GrpcElectionTest {
         awaitNoCoordinator(4);
         assertTrue(workers.get(4).getRecentEvents(0).stream()
                         .anyMatch(event -> event.kind().equals(com.cs324.common.WorkerEvent.QUORUM_LOST)),
-                "the minority leader must record that it lost quorum");
+                () -> "the minority leader must record that it lost quorum; feed:\n" + feed(4));
     }
 
     @Test

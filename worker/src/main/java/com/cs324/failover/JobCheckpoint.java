@@ -31,6 +31,8 @@ public final class JobCheckpoint {
     private long term;
     // The accepting coordinator owns this job until it fails, even after leadership rotates.
     private int acceptedBy = -1;
+    // The term in which the current owner took the job, so a newer takeover supersedes it.
+    private long ownerTerm;
     private TaskResult finalResult;
     private boolean delivered;
 
@@ -52,18 +54,30 @@ public final class JobCheckpoint {
         return acceptedBy;
     }
 
+    // The term in which the current owner took the job.
+    public long ownerTerm() {
+        return ownerTerm;
+    }
+
     // Detached read view; called while the owning log holds its monitor.
     JobCheckpoint copy() {
         JobCheckpoint copy = new JobCheckpoint(request, acceptedAtMillis, sequence, term);
         copy.slices.putAll(slices);
         copy.acceptedBy = acceptedBy;
+        copy.ownerTerm = ownerTerm;
         copy.finalResult = finalResult;
         copy.delivered = delivered;
         return copy;
     }
 
-    void acceptedBy(int coordinatorId) {
+    // Ownership moves with a takeover: the newest term wins and an older one cannot take it back.
+    boolean claim(int coordinatorId, long term) {
+        if (term < ownerTerm) {
+            return false;
+        }
         this.acceptedBy = coordinatorId;
+        this.ownerTerm = term;
+        return true;
     }
 
     public SubmitJobRequest request() {

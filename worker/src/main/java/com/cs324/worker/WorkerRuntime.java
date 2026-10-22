@@ -4,7 +4,6 @@ import com.cs324.common.ClusterDirectory;
 import com.cs324.common.BoundedMap;
 import com.cs324.common.BoundedSet;
 import com.cs324.common.Constants;
-import com.cs324.common.WorkerAddress;
 import com.cs324.common.WorkerControl;
 import com.cs324.common.WorkerEvent;
 import com.cs324.election.ElectionGrpcService;
@@ -762,19 +761,17 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
                 }
             }
             // No grandparent worked: ask the directory for any other live worker.
-            if (bootstrap != null) {
-                try {
-                    List<Integer> active = new ArrayList<>(bootstrap.getActiveWorkerIds());
-                    Collections.sort(active);
-                    for (int candidate : active) {
-                        if (isRepairCandidate(candidate, deadId) && tryRepairEdge(candidate, deadId)) {
-                            retryElectionAfterRepair(deadId);
-                            return;
-                        }
+            try {
+                List<Integer> active = directoryMembers();
+                Collections.sort(active);
+                for (int candidate : active) {
+                    if (isRepairCandidate(candidate, deadId) && tryRepairEdge(candidate, deadId)) {
+                        retryElectionAfterRepair(deadId);
+                        return;
                     }
-                } catch (Exception ignored) {
-                    // directory unreachable: keep the pruned state, a later wave retries
                 }
+            } catch (Exception ignored) {
+                // directory unreachable: keep the pruned state, a later wave retries
             }
         } finally {
             repairInProgress.remove(deadId);
@@ -816,16 +813,29 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         return candidate != id && candidate != deadId && !neighbours.containsKey(candidate);
     }
 
-    // Resolves one candidate through Bootstrap and links it bidirectionally; false = try next.
+    // Workers the directory can reach. The gRPC registry is the source of truth, so the
+    // repair works for every worker that published an endpoint, not only for the ones
+    // that were handed a directory reference at startup.
+    private List<Integer> directoryMembers() {
+        if (grpcDirectory != null) {
+            List<Integer> members = new ArrayList<>();
+            for (var endpoint : grpcDirectory.workers()) {
+                members.add(endpoint.getWorkerId());
+            }
+            return members;
+        }
+        if (bootstrap != null) {
+            return new ArrayList<>(bootstrap.getActiveWorkerIds());
+        }
+        return List.of();
+    }
+
+    // Resolves one candidate through the registry and links it bidirectionally; false = try next.
     private boolean tryRepairEdge(int candidate, int deadId) {
-        if (bootstrap == null) {
+        if (grpcDirectory == null) {
             return false;
         }
         try {
-            WorkerAddress address = bootstrap.getWorkerAddress(candidate);
-            if (address == null) {
-                return false;
-            }
             WorkerControl stub = new com.cs324.computation.GrpcWorkerClient(grpcDirectory.worker(candidate));
             stub.ping();
             neighbours.put(candidate, stub);
@@ -1024,6 +1034,19 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         @Override
         public void onDeliveryFailed(int jobId) {
             checkpoints.markDelivered(jobId, false);
+        }
+
+        @Override
+        public void onOwnershipClaimed(int jobId) {
+            // The claim is pushed to the peers so no other survivor rebuilds this job.
+            // It is best effort: a failed push must not lose the recovery itself.
+            write(() -> checkpoints.claimEntry(jobId, id, currentTerm.get()), false);
+        }
+
+        @Override
+        public boolean ownsJob(int jobId) {
+            JobCheckpoint job = checkpoints.job(jobId);
+            return job == null || job.acceptedBy() == id;
         }
 
         private void write(java.util.function.Supplier<CheckpointEntry> create, boolean waitForPeer) {

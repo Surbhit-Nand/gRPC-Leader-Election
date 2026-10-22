@@ -3,6 +3,7 @@ package com.cs324.failover;
 import com.cs324.common.Constants;
 import com.cs324.failover.proto.CheckpointEntry;
 import com.cs324.failover.proto.JobAccepted;
+import com.cs324.failover.proto.JobClaimed;
 import com.cs324.failover.proto.JobFinished;
 import com.cs324.failover.proto.SliceState;
 import com.cs324.failover.proto.SliceUpdated;
@@ -37,11 +38,22 @@ public final class CheckpointLog {
 
     // Return true only when the entry advances the replica state.
     public synchronized boolean apply(CheckpointEntry entry) {
+        if (entry == null) {
+            return false;
+        }
         int jobId = entry.getJobId();
         if (jobId < 1 || entry.getEntryCase() == CheckpointEntry.EntryCase.ENTRY_NOT_SET) {
             return false;
         }
         JobCheckpoint job = jobs.get(jobId);
+        if (entry.getEntryCase() == CheckpointEntry.EntryCase.CLAIMED) {
+            // A claim only states who owns the job. It is ordered by term, not by the
+            // per-job sequence, so two takeovers cannot overwrite each other's ownership.
+            if (job == null) {
+                return false;
+            }
+            return job.claim(entry.getClaimed().getCoordinatorId(), entry.getClaimed().getTerm());
+        }
         if (job != null) {
             // Generation first: a deposed coordinator must not resurrect a term it has lost.
             if (entry.getTerm() < job.term()) {
@@ -63,7 +75,7 @@ public final class CheckpointLog {
             job = new JobCheckpoint(accepted.getRequest(), accepted.getAcceptedAtMillis(),
                     entry.getSequence(), entry.getTerm());
             job.adoptInitialSlices(accepted.getSlicesList());
-            job.acceptedBy(entry.getCoordinatorId());
+            job.claim(entry.getCoordinatorId(), entry.getTerm());
             jobs.put(jobId, job);
         } else {
             switch (entry.getEntryCase()) {
@@ -160,13 +172,28 @@ public final class CheckpointLog {
                 .build();
     }
 
+    // Builds the claim that hands a recovered job to the coordinator that rebuilt it.
+    public synchronized CheckpointEntry claimEntry(int jobId, int newOwner, long term) {
+        JobCheckpoint job = jobs.get(jobId);
+        if (job == null) {
+            return null;
+        }
+        return CheckpointEntry.newBuilder()
+                .setJobId(jobId)
+                .setSequence(job.sequence())
+                .setTerm(term)
+                .setCoordinatorId(newOwner)
+                .setClaimed(JobClaimed.newBuilder().setCoordinatorId(newOwner).setTerm(term))
+                .build();
+    }
+
     // Export current slices and any terminal marker while preserving the job owner.
     public synchronized List<CheckpointEntry> snapshot(int jobId) {
         JobCheckpoint job = jobs.get(jobId);
         if (job == null) {
             return List.of();
         }
-        List<CheckpointEntry> entries = new ArrayList<>(2);
+        List<CheckpointEntry> entries = new ArrayList<>(3);
         entries.add(CheckpointEntry.newBuilder()
                 .setJobId(jobId)
                 // A terminal snapshot needs two entries, but neither may invent a future sequence or the next real delivery update will be dropped.
@@ -189,6 +216,17 @@ public final class CheckpointLog {
                             .setDelivered(job.delivered()))
                     .build());
         }
+        // The current owner travels with the snapshot, so a survivor learns that a peer
+        // already rebuilt this job instead of rebuilding it a second time.
+        entries.add(CheckpointEntry.newBuilder()
+                .setJobId(jobId)
+                .setSequence(job.sequence())
+                .setTerm(job.ownerTerm())
+                .setCoordinatorId(job.acceptedBy())
+                .setClaimed(JobClaimed.newBuilder()
+                        .setCoordinatorId(job.acceptedBy())
+                        .setTerm(job.ownerTerm()))
+                .build());
         return entries;
     }
 

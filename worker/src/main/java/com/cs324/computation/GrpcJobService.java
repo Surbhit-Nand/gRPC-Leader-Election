@@ -66,6 +66,15 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
         catch (RuntimeException e) { System.err.println("Checkpoint update failed: " + e.getMessage()); }
     }
 
+    // Whether this worker still owns the job; a newer takeover takes the job away.
+    private boolean ownsJob(int jobId) {
+        try {
+            return checkpoints.ownsJob(jobId);
+        } catch (RuntimeException e) {
+            return true;
+        }
+    }
+
     public GrpcJobService(int id, Supplier<CoordinatorEndpoint> self, Supplier<List<WorkerEndpoint>> discovery,
             IntPredicate admission, IntConsumer assignment, Runnable accepted, Executor executor,
             ProgressService progress, Duration timeout) {
@@ -286,6 +295,9 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
             long pending = slices.stream().filter(slice -> slice.result==null).count();
             log(WorkerEvent.JOB_RECOVERED, "Job " + request.getJobId() + " restored on coordinator Worker "
                     + id + " with " + pending + " unfinished slice(s)");
+            // Claim the recovered job before any work starts, so a survivor that takes over
+            // later sees a live owner and leaves this job alone.
+            checkpoint(sink -> sink.onOwnershipClaimed(request.getJobId()));
             publishProgress();
             deadline=timer.schedule(() -> fail("Job timed out waiting for worker results"),
                     Math.max(remainingMillis, 1L), TimeUnit.MILLISECONDS);
@@ -425,6 +437,12 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
             if (deadline!=null) deadline.cancel(false);
             if (probes!=null) probes.cancel(false);
             jobs.remove(request.getJobId(), this);
+            // A newer takeover owns the job now, so that coordinator answers the client.
+            if (!ownsJob(request.getJobId())) {
+                log("JOB_SUPERSEDED", "Job " + request.getJobId()
+                        + " was taken over by another coordinator; the new owner delivers the result");
+                return;
+            }
             // Record completion before callback delivery so takeover can replay an unconfirmed result.
             checkpoint(sink -> sink.onFinished(request.getJobId(), result));
             ClientEndpoint client=request.getClient();
@@ -481,6 +499,8 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
     // Sends one already-computed result to its client, used when replaying a tombstone.
     public boolean deliverResult(SubmitJobRequest request, TaskResult result) {
         try {
+            // Claim the job before replaying, so two survivors do not both answer the client.
+            checkpoint(sink -> sink.onOwnershipClaimed(request.getJobId()));
             ClientEndpoint client = request.getClient();
             endpoint(client.getHost(), client.getPort());
             ManagedChannel channel = GrpcChannels.get(client.getHost(), client.getPort());
