@@ -93,11 +93,11 @@ class GrpcWorkerRecoveryTest {
         return result.build();
     }
     @ParameterizedTest
-    @CsvSource({"MAX,20", "PRIMESUM,41", "PRIMECOUNT,4"})
+    @CsvSource({"MAX,19", "PRIMESUM,36", "PRIMECOUNT,2"})
     void acceptedWorkerDiesNewWorkerRecoversAndStaleResultsAreFenced(String type, long expected) throws Exception {
         BlockingQueue<Runnable> oldWork=new LinkedBlockingQueue<>();
         Server failed=worker(2, oldWork::add);
-        SubmitJobRequest job=submit(type,new int[]{2,3,4,17,19,20});
+        SubmitJobRequest job=submit(type,new int[]{17,19});
         Runnable delayed=oldWork.poll(5,TimeUnit.SECONDS);
         assertNotNull(delayed,"worker accepted active work before dying");
         BlockingQueue<Runnable> newWork=new LinkedBlockingQueue<>();
@@ -126,7 +126,7 @@ class GrpcWorkerRecoveryTest {
         JobProgress last=null;
         while(snapshots.hasNext()) last=snapshots.next();
         assertNotNull(last); assertTrue(last.getFinished());
-        assertEquals(6,last.getWorkersList().stream().mapToLong(WorkerProgress::getCompletedUnits).sum());
+        assertEquals(2,last.getWorkersList().stream().mapToLong(WorkerProgress::getCompletedUnits).sum());
         assertTrue(last.getWorkersList().stream().anyMatch(w -> w.getWorkerId()==3));
         assertFalse(last.getWorkersList().stream().anyMatch(w -> w.getWorkerId()==2));
         assertEquals(7,result(submit("MAX",new int[]{7})),"coordinator remains usable");
@@ -134,31 +134,31 @@ class GrpcWorkerRecoveryTest {
     @Test void multipleFailedSlicesCanRecoverOnCoordinator() throws Exception {
         BlockingQueue<Runnable> work=new LinkedBlockingQueue<>();
         Server second=worker(2,work::add), third=worker(3,work::add);
-        SubmitJobRequest job=submit("PRIMESUM",new int[]{2,3,5,7,11,13});
+        SubmitJobRequest job=submit("PRIMESUM",new int[]{2,3,5,7});
         assertNotNull(work.poll(5,TimeUnit.SECONDS)); assertNotNull(work.poll(5,TimeUnit.SECONDS));
         second.shutdownNow(); third.shutdownNow();
-        assertEquals(41L,result(job));
+        assertEquals(17L,result(job));
     }
     @Test void healthySlowWorkerIsNotReassignedAndDuplicateProbesDoNotRecalculate() throws Exception {
         BlockingQueue<Runnable> work=new LinkedBlockingQueue<>();
         worker(2,work::add);
-        SubmitJobRequest job=submit("PRIMECOUNT",new int[]{2,3,5,7});
+        SubmitJobRequest job=submit("PRIMECOUNT",new int[]{2,3});
         Runnable calculation=work.poll(5,TimeUnit.SECONDS); assertNotNull(calculation);
         assertNull(work.poll(1700,TimeUnit.MILLISECONDS),"probes must reuse in-flight work");
         assertFalse(results.get(job.getJobId()).isDone());
-        calculation.run(); assertEquals(4,result(job));
+        calculation.run(); assertEquals(2,result(job));
     }
     @Test void duplicateResultsDuringActiveJobDoNotDoubleCount() throws Exception {
         BlockingQueue<Runnable> secondWork=new LinkedBlockingQueue<>(), thirdWork=new LinkedBlockingQueue<>();
         worker(2,secondWork::add); worker(3,thirdWork::add);
-        SubmitJobRequest job=submit("PRIMESUM",new int[]{2,3,5,7,11,13});
+        SubmitJobRequest job=submit("PRIMESUM",new int[]{2,5,7});
         Runnable second=secondWork.poll(5,TimeUnit.SECONDS), third=thirdWork.poll(5,TimeUnit.SECONDS);
         assertNotNull(second); assertNotNull(third);
-        client.reportTaskResult(forged(job,2,1,12));
+        client.reportTaskResult(forged(job,2,1,5));
         client.reportTaskResult(forged(job,2,1,999));
         second.run();
         assertFalse(results.get(job.getJobId()).isDone());
-        third.run(); assertEquals(41L,result(job));
+        third.run(); assertEquals(14L,result(job));
     }
 
     @Test void lostCommunicationRecoversConcurrentJobsWithoutStoppingWorkerServer() throws Exception {
@@ -179,10 +179,10 @@ class GrpcWorkerRecoveryTest {
         BlockingQueue<Runnable> work=new LinkedBlockingQueue<>();
         worker(2,work::add);
         dropNextReport.set(true);
-        SubmitJobRequest job=submit("PRIMECOUNT",new int[]{2,3,4,5});
+        SubmitJobRequest job=submit("PRIMECOUNT",new int[]{2,3});
         Runnable calculation=work.poll(5,TimeUnit.SECONDS); assertNotNull(calculation);
         calculation.run();
-        assertEquals(3,result(job));
+        assertEquals(2,result(job));
         assertTrue(reportAttempts.get()>=2,"cached result must be reported again after the dropped callback");
         assertTrue(work.isEmpty(),"callback retries must not repeat the calculation");
     }

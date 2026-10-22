@@ -6,6 +6,7 @@
 #   .\run.ps1 bootstrap [grpcPort] [--state-file path] # default 50051
 #   .\run.ps1 worker [host] [grpcPort]               # default localhost 50051
 #   .\run.ps1 client [host] [callbackPort] [grpcPort] # default localhost 1199 50051
+#   .\run.ps1 reset-state [stateFile]                # default bootstrap-state.properties
 $ErrorActionPreference = "Stop"
 
 function Get-Mvn {
@@ -49,6 +50,32 @@ switch ($command) {
         }
         & java -cp (Get-Classpath "bootstrap") com.cs324.bootstrap.BootstrapNode @bootstrapArgs
     }
+    "reset-state" {
+        # Bootstrap resolves its default path against the current directory, so do the same here.
+        $stateFile = if ($args.Count -ge 2) { $args[1] } else { "bootstrap-state.properties" }
+        $statePath = [System.IO.Path]::GetFullPath($stateFile)
+        $bootstrap = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -like "*com.cs324.bootstrap.BootstrapNode*" }
+        if ($bootstrap) {
+            $pids = ($bootstrap | ForEach-Object { $_.ProcessId }) -join ", "
+            throw "Bootstrap is running (PID $pids). Stop bootstrap and all workers before resetting IDs; " +
+                "a live bootstrap keeps its counters in memory and would rewrite the state file."
+        }
+        $removed = @()
+        foreach ($path in @($statePath, "$statePath.tmp")) {
+            if (Test-Path -LiteralPath $path) {
+                Remove-Item -LiteralPath $path -Force
+                $removed += $path
+            }
+        }
+        if ($removed.Count -eq 0) {
+            Write-Host "No state file at $statePath; counters already start at 1."
+        } else {
+            $removed | ForEach-Object { Write-Host "Removed $_" }
+            Write-Host "Next bootstrap start assigns Worker 1 and Job 1."
+        }
+        Write-Host "Start a fresh cluster with: .\run.ps1 bootstrap"
+    }
     "worker" {
         $hostArg = if ($args.Count -ge 2) { $args[1] } else { "localhost" }
         $portArg = if ($args.Count -ge 3) { $args[2] } else { "50051" }
@@ -61,6 +88,6 @@ switch ($command) {
         & java -cp (Get-Classpath "client") com.cs324.client.ClientApp $hostArg $callbackArg $grpcArg
     }
     default {
-        Write-Host "Usage: .\run.ps1 build | bootstrap [grpcPort] [--state-file path] | worker [host] [grpcPort] | client [host] [callbackPort] [grpcPort]"
+        Write-Host "Usage: .\run.ps1 build | bootstrap [grpcPort] [--state-file path] | worker [host] [grpcPort] | client [host] [callbackPort] [grpcPort] | reset-state [stateFile]"
     }
 }

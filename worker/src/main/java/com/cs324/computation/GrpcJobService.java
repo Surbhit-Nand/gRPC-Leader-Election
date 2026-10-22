@@ -19,6 +19,7 @@ import java.util.function.*;
 public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase implements AutoCloseable {
     private static final long PROBE_INTERVAL_MILLIS = 500;
     private static final long PROBE_TIMEOUT_MILLIS = 1_000;
+    private static final int SLICES_PER_PARTICIPANT = 4;
     private final int id;
     private final Supplier<CoordinatorEndpoint> self;
     private final Supplier<List<WorkerEndpoint>> discovery;
@@ -114,7 +115,8 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
                             throw new IllegalArgumentException("Duplicate worker ID in discovery");
                     }
                 }
-                List<Object> chunks = WorkerTaskDistributor.split(request.getJobType(), payload, members.size()+1);
+                int targetSlices = Math.multiplyExact(members.size()+1, SLICES_PER_PARTICIPANT);
+                List<Object> chunks = WorkerTaskDistributor.split(request.getJobType(), payload, targetSlices);
                 if (!admission.test(request.getJobId()))
                     throw Status.FAILED_PRECONDITION.withDescription("Worker is not accepting coordinator jobs").asRuntimeException();
                 admitted = true;
@@ -229,7 +231,10 @@ public final class GrpcJobService extends JobServiceGrpc.JobServiceImplBase impl
         Run(SubmitJobRequest request, List<Object> chunks, List<WorkerEndpoint> peers) {
             this.request=request;
             WorkerEndpoint local = WorkerEndpoint.newBuilder().setWorkerId(id).build();
-            for (int i=0; i<chunks.size(); i++) slices.add(new Slice(i+1, chunks.get(i), i==0?local:peers.get(i-1)));
+            List<WorkerEndpoint> ring = new ArrayList<>(peers.size()+1);
+            ring.add(local);
+            ring.addAll(peers);
+            for (int i=0; i<chunks.size(); i++) slices.add(new Slice(i+1, chunks.get(i), ring.get(i % ring.size())));
         }
         // Rebuilds a job a dead coordinator owned; every field comes from the replicated log.
         Run(com.cs324.failover.RestoredJob restored) {

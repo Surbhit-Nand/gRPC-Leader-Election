@@ -85,10 +85,11 @@ class GrpcJobDistributionTest {
     }
     @Test void maxUsesPublishedGrpcPortsAndStreamsActualWork() throws Exception {
         SubmitJobRequest request = request("MAX", new int[]{-9,-2,-5,-7,-4,-8});
-        assertEquals(-2, run(request)); assertEquals(2, assignments.get());
+        assertEquals(-2, run(request)); assertEquals(4, assignments.get());
         JobProgress last = progress(request.getJobId());
         assertTrue(last.getFinished()); assertEquals(3, last.getWorkersCount());
         assertEquals(6, last.getWorkersList().stream().mapToLong(WorkerProgress::getCompletedUnits).sum());
+        assertTrue(last.getWorkersList().stream().allMatch(w -> w.getCompletedUnits() == 2));
         assertTrue(discovery.workers().stream().allMatch(w -> w.getGrpcPort() > 0 && w.getGrpcPort() != w.getPort()));
     }
     @Test void primeSumRetains64BitResult() throws Exception {

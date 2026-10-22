@@ -277,9 +277,13 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
     private final Map<Integer, Set<Integer>> twoHop = new ConcurrentHashMap<>();
     // Once-guard so concurrent failures on the same dead id rewire exactly once.
     private final Set<Integer> repairInProgress = ConcurrentHashMap.newKeySet();
+    // A repaired edge is not part of the wave that discovered the dead one; retry once with it.
+    private final AtomicBoolean electionRetryScheduled = new AtomicBoolean(false);
     // Recent happenings for the GUI feed; a bounded ring so a chatty cluster cannot leak memory.
     private final Deque<WorkerEvent> recentEvents = new ArrayDeque<>();
-    private static final int MAX_RECENT_EVENTS = 64;
+    // Finer job slices produce more per-task events; keep enough history that the
+    // failure, recovery and result of one job remain visible in the GUI feed.
+    private static final int MAX_RECENT_EVENTS = 256;
     private final AtomicLong eventSeq = new AtomicLong(0);
 
     // Pool for job slices; daemon threads, so a missed shutdown cannot hang the JVM.
@@ -753,6 +757,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
             }
             for (int candidate : candidates) {
                 if (tryRepairEdge(candidate, deadId)) {
+                    retryElectionAfterRepair(deadId);
                     return;
                 }
             }
@@ -763,6 +768,7 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
                     Collections.sort(active);
                     for (int candidate : active) {
                         if (isRepairCandidate(candidate, deadId) && tryRepairEdge(candidate, deadId)) {
+                            retryElectionAfterRepair(deadId);
                             return;
                         }
                     }
@@ -773,6 +779,36 @@ public class WorkerRuntime implements WorkerControl, ElectionHandler, FailoverHa
         } finally {
             repairInProgress.remove(deadId);
         }
+    }
+
+    // A new edge is added after the failed wave has already chosen its voters. If the
+    // dead worker was our coordinator, run one more wave now that the survivors can
+    // reach each other; otherwise a star rooted at the dead hub stays leaderless.
+    private void retryElectionAfterRepair(int deadId) {
+        if (currentCoordinatorId != -1 && currentCoordinatorId != deadId) {
+            return;
+        }
+        if (!electionRetryScheduled.compareAndSet(false, true)) {
+            return;
+        }
+        Thread retry = new Thread(() -> {
+            try {
+                long jitter = Constants.FAILOVER_ELECTION_JITTER_MS <= 0 ? 0
+                        : (long) (Math.random() * Constants.FAILOVER_ELECTION_JITTER_MS);
+                if (jitter > 0) {
+                    Thread.sleep(jitter);
+                }
+                if (!isShutdown() && (currentCoordinatorId == -1 || currentCoordinatorId == deadId)) {
+                    startElection();
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            } finally {
+                electionRetryScheduled.set(false);
+            }
+        }, "election-retry-" + id);
+        retry.setDaemon(true);
+        retry.start();
     }
 
     // Eligible rewire target: not us, not the corpse, and not already a neighbour.

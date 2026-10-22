@@ -116,7 +116,7 @@ class GrpcControlRegressionTest {
         jobs.submitJob(request);
         assertEquals(1, two.getJobsCoordinatedInTerm());
         assertEquals(1, callbacks.get());
-        assertEquals(1, two.getJobAllocationCounter());
+        assertEquals(2, two.getJobAllocationCounter());
     }
 
     @Test void fifthAcceptedJobRotatesAndDuplicateAnnouncementCannotResetBudget() throws Exception {

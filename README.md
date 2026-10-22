@@ -115,6 +115,17 @@ The bootstrap writes its worker/job counters to `bootstrap-state.properties`
 (git-ignored) so a restart does not immediately reuse an ID. Use `--state-file`
 to keep that file somewhere else, or set `-Dbootstrap.state.file=...`.
 
+For a fresh demo where IDs start at 1 again, stop bootstrap and all workers,
+then clear the counters:
+
+```powershell
+.\run.ps1 reset-state
+```
+
+Pass a path to reset a custom `--state-file`. The command refuses to run while
+a bootstrap process is alive, because that process would rewrite its in-memory
+counters on the next save.
+
 For a second client, use a different callback port:
 
 ```powershell
@@ -172,7 +183,8 @@ commands for explicit process ownership during crash demonstrations.
   Discovery is refreshed before reassignment, so newly joined workers can receive
   unfinished slices. Previously completed slices remain counted once.
 - **Progress:** the server streams completed units; the GUI can show a worker
-  breakdown. Interrupted streams reconnect and rediscover a recovered job's owner.
+  breakdown. Jobs use several slices per participant so progress advances in
+  smaller steps. Interrupted streams reconnect and rediscover a recovered job's owner.
 - **Coordinator failure:** survivors detect missed heartbeats, elect a leader,
   merge checkpoint snapshots and resume unfinished work or replay a saved result.
 - **Split-brain guard:** a leader renews a majority lease with bounded status

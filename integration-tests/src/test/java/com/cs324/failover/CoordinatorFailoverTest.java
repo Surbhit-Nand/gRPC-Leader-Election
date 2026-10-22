@@ -214,7 +214,7 @@ private Object awaitResult(int jobId) throws Exception {
                 + " within " + boundMillis + "ms; last views: " + views + "\n  recent events:" + events);
     }
 
-// What every worker currently believes, for failure messages.
+    // What every worker currently believes, for failure messages.
     private String clusterState() {
         StringBuilder state = new StringBuilder();
         for (var entry : workers.entrySet()) {
@@ -234,7 +234,8 @@ private Object awaitResult(int jobId) throws Exception {
         return state.toString();
     }
 
-    // Wait for every slice to be dispatched before crashing the coordinator.
+    // Wait for the first slice dispatch. With several slices per participant, waiting
+    // for every slice can let a fast job finish before the simulated crash.
     private void awaitDispatched(int coordinatorId, int jobId, int expectedSlices) throws Exception {
         long deadline = System.currentTimeMillis() + 30_000;
         while (System.currentTimeMillis() < deadline) {
@@ -247,8 +248,38 @@ private Object awaitResult(int jobId) throws Exception {
             }
             Thread.sleep(50);
         }
-        throw new AssertionError("the coordinator did not dispatch every slice of job " + jobId
+        throw new AssertionError("the coordinator did not dispatch job " + jobId
                 + " within 30s; feed: " + workers.get(coordinatorId).getRecentEvents(0));
+    }
+
+    // Wait for one event kind on any survivor instead of reading a ring that may have rolled over.
+    private void awaitEvent(Set<Integer> ids, String kind, long timeoutMillis) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMillis;
+        while (System.currentTimeMillis() < deadline) {
+            for (int id : ids) {
+                for (WorkerEvent event : workers.get(id).getRecentEvents(0)) {
+                    // Some lifecycle messages are logged as FAILOVER_DETAIL with the
+                    // event name in the text, matching the GUI's story feed.
+                    if (event.kind().equals(kind) || event.detail().contains(kind)) {
+                        return;
+                    }
+                }
+            }
+            Thread.sleep(20);
+        }
+        throw new AssertionError("no survivor recorded " + kind + " within "
+                + timeoutMillis + "ms; feed:\n" + recentEvents(ids));
+    }
+
+    private String recentEvents(Set<Integer> ids) {
+        StringBuilder feed = new StringBuilder();
+        for (int id : ids) {
+            for (WorkerEvent event : workers.get(id).getRecentEvents(0)) {
+                feed.append("w").append(id).append(' ').append(event.kind()).append(' ')
+                        .append(event.detail()).append('\n');
+            }
+        }
+        return feed.toString();
     }
 
     // Kills a worker the way a crashed process looks: no farewell, no deregistration.
@@ -317,9 +348,10 @@ private Object awaitResult(int jobId) throws Exception {
         int smallJob = submitToCurrentCoordinator(all, "PRIMESUM", new WorkerTaskCalculator.PrimeRange(1, 1000));
         assertEquals(KNOWN_SMALL_SUM, ((Number) awaitResult(smallJob)).longValue());
 
-        // A long job: each share takes seconds, so the kill lands with work in flight.
+        // Crash as soon as the first slice starts: with several slices per participant,
+        // waiting for every worker to receive one lets a fast job finish before the kill.
         int jobId = submitToCurrentCoordinator(all, "PRIMESUM", new WorkerTaskCalculator.PrimeRange(1, RANGE_END));
-        awaitDispatched(first, jobId, workers.size());
+        awaitDispatched(first, jobId, 1);
         assertTrue(!answers.get(jobId).isDone(), "the crash must interrupt an unfinished job");
         crash(first);
 
@@ -350,7 +382,7 @@ Object recovered = awaitResult(jobId);
 
         // The new coordinator is a working coordinator, not just a replacement leader.
         int afterJob = submitToCurrentCoordinator(survivors, "PRIMECOUNT", new int[] {2, 3, 4, 5, 8, 11});
-assertEquals(4, ((Number) awaitResult(afterJob)).intValue());
+        assertEquals(4, ((Number) awaitResult(afterJob)).intValue());
         assertEquals(1, answersDelivered(afterJob));
     }
 
@@ -366,32 +398,43 @@ assertEquals(4, ((Number) awaitResult(afterJob)).intValue());
         int first = awaitCoordinator(all, -1, 30_000);
 
         int jobId = submitToCurrentCoordinator(all, "PRIMESUM", new WorkerTaskCalculator.PrimeRange(1, RANGE_END));
-        awaitDispatched(first, jobId, workers.size());
+        awaitDispatched(first, jobId, 1);
         assertTrue(!answers.get(jobId).isDone(), "the crash must interrupt an unfinished job");
         crash(first);
         // Only survivors can be polled: a crashed worker's view is frozen at the old leader.
         Set<Integer> survivors = new LinkedHashSet<>(all);
         survivors.remove(first);
         int second = awaitCoordinator(survivors, first, FAILOVER_BOUND_MS);
-        awaitResult(jobId);
 
-        // The feed is what the demo shows, so the whole story has to be in it.
-        StringBuilder feed = new StringBuilder();
-        for (int id : survivors) {
-            for (com.cs324.common.WorkerEvent event : workers.get(id).getRecentEvents(0)) {
-                feed.append(event.kind()).append(' ').append(event.detail()).append('\n');
-            }
-        }
-        String text = feed.toString();
-        assertTrue(text.contains(WorkerEvent.COORDINATOR_FAILED),
-                "a survivor must record that the coordinator failed");
-        assertTrue(text.contains(WorkerEvent.FAILOVER_STARTED),
-                "a survivor must record that it started a failover");
-        assertTrue(text.contains(WorkerEvent.JOB_RECOVERED),
-                "the new coordinator must record the job it took over");
-        assertTrue(text.contains(WorkerEvent.CHECKPOINT_REPLICATED),
-                "the coordinator must record that it replicated job state");
+        // The ring keeps only recent events. With several slices per worker, waiting for
+        // the result first can evict the early recovery events, so observe each one as it appears.
+        awaitEvent(survivors, WorkerEvent.COORDINATOR_FAILED, FAILOVER_BOUND_MS);
+        awaitEvent(survivors, WorkerEvent.FAILOVER_STARTED, FAILOVER_BOUND_MS);
+        awaitEvent(survivors, WorkerEvent.JOB_RECOVERED, FAILOVER_BOUND_MS);
+        awaitEvent(survivors, WorkerEvent.CHECKPOINT_REPLICATED, FAILOVER_BOUND_MS);
+        awaitResult(jobId);
         assertNotEquals(first, second);
+    }
+
+    @Test
+    void aStarTopologyCanReplaceItsFailedHub() throws Exception {
+        addWorker(1);
+        addWorker(2);
+        addWorker(3);
+        // Leaves 1 and 2 are linked only to the hub. Killing the hub leaves each
+        // survivor with a dead edge, which repair must replace before an election
+        // can reach the other survivor and a majority.
+        workers.get(1).connectAsNeighbour(3, "localhost", contactPort);
+        workers.get(3).connectAsNeighbour(1, "localhost", contactPort);
+        workers.get(2).connectAsNeighbour(3, "localhost", contactPort);
+        workers.get(3).connectAsNeighbour(2, "localhost", contactPort);
+
+        workers.get(3).startElection();
+        assertEquals(3, awaitCoordinator(Set.of(1, 2, 3), -1, 30_000));
+
+        crash(3);
+        int second = awaitCoordinator(Set.of(1, 2), 3, FAILOVER_BOUND_MS);
+        assertNotEquals(3, second);
     }
 
     @Test
@@ -405,7 +448,7 @@ assertEquals(4, ((Number) awaitResult(afterJob)).intValue());
         workers.get(1).startElection();
         int first = awaitCoordinator(all, -1, 30_000);
 
-int jobId = submitToCurrentCoordinator(all, "MAX", new int[] {3, 9, 4, 9, -2});
+        int jobId = submitToCurrentCoordinator(all, "MAX", new int[] {3, 9, 4, 9, -2});
         assertEquals(9, ((Number) awaitResult(jobId)).intValue());
         assertEquals(1, answersDelivered(jobId));
 
